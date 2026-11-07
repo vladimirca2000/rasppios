@@ -21,6 +21,15 @@ const TAG_VIRTUAL_SIZE: u32 = 0x0004_8004;
 const TAG_DEPTH: u32 = 0x0004_8005;
 const TAG_ALLOCATE_BUFFER: u32 = 0x0004_0001;
 const TAG_PITCH: u32 = 0x0004_0008;
+const WIDTH: i32 = 640;
+const HEIGHT: i32 = 480;
+
+pub const BLACK: u16 = 0x0000;
+pub const NAVY: u16 = 0x000F;
+pub const WHITE: u16 = 0xFFFF;
+pub const RED: u16 = 0xF800;
+pub const GREEN: u16 = 0x07E0;
+pub const BLUE: u16 = 0x001F;
 
 #[repr(C, align(16))]
 struct FramebufferMessage {
@@ -29,6 +38,7 @@ struct FramebufferMessage {
 
 static mut MESSAGE: FramebufferMessage = FramebufferMessage { words: [0; 35] };
 static mut AVAILABLE: bool = false;
+static mut BUFFER: u64 = 0;
 static mut PITCH: u32 = 0;
 
 pub fn init() -> bool {
@@ -39,6 +49,7 @@ pub fn init() -> bool {
         return false;
     }
     unsafe {
+        write_volatile(addr_of_mut!(BUFFER), start);
         write_volatile(addr_of_mut!(PITCH), pitch);
         write_volatile(addr_of_mut!(AVAILABLE), true);
     }
@@ -51,9 +62,272 @@ pub fn available() -> bool {
     unsafe { read_volatile(addr_of!(AVAILABLE)) }
 }
 
+/// Preenche a área visível inteira com uma cor RGB565.
+pub fn clear(color: u16) {
+    rect(0, 0, WIDTH, HEIGHT, color);
+}
+
+/// Desenha um retângulo RGB565, recortando-o aos limites da tela.
+pub fn rect(x: i32, y: i32, width: i32, height: i32, color: u16) {
+    let Some((buffer, pitch)) = framebuffer() else {
+        return;
+    };
+    let Some(x1) = x.checked_add(width) else {
+        return;
+    };
+    let Some(y1) = y.checked_add(height) else {
+        return;
+    };
+    let x0 = x.max(0).min(WIDTH);
+    let y0 = y.max(0).min(HEIGHT);
+    let x1 = x1.max(0).min(WIDTH);
+    let y1 = y1.max(0).min(HEIGHT);
+    if x0 >= x1 || y0 >= y1 {
+        return;
+    }
+
+    for row in y0 as usize..y1 as usize {
+        for column in x0 as usize..x1 as usize {
+            let offset = row * pitch + column * size_of::<u16>();
+            unsafe {
+                write_volatile((buffer + offset) as *mut u16, color);
+            }
+        }
+    }
+}
+
+/// Desenha texto com glifos monocromáticos 5×7 e avanço de seis pixels.
+pub fn text(x: i32, y: i32, text: &str, color: u16, background: u16) {
+    let Some((buffer, pitch)) = framebuffer() else {
+        return;
+    };
+    let mut cursor_x = x;
+    let mut cursor_y = y;
+    for character in text.chars() {
+        match character {
+            '\r' => cursor_x = x,
+            '\n' => {
+                cursor_x = x;
+                let Some(next_y) = cursor_y.checked_add(8) else {
+                    break;
+                };
+                cursor_y = next_y;
+                if cursor_y >= HEIGHT {
+                    break;
+                }
+            }
+            character => {
+                let glyph = glyph(character);
+                for (row, bits) in glyph.iter().copied().enumerate() {
+                    let Some(pixel_y) = cursor_y.checked_add(row as i32) else {
+                        continue;
+                    };
+                    if pixel_y < 0 || pixel_y >= HEIGHT {
+                        continue;
+                    }
+                    for column in 0..5 {
+                        let Some(pixel_x) = cursor_x.checked_add(column) else {
+                            continue;
+                        };
+                        if pixel_x < 0 || pixel_x >= WIDTH {
+                            continue;
+                        }
+                        let pixel = if bits & (1 << (4 - column)) != 0 {
+                            color
+                        } else {
+                            background
+                        };
+                        let offset = pixel_y as usize * pitch + pixel_x as usize * size_of::<u16>();
+                        unsafe {
+                            write_volatile((buffer + offset) as *mut u16, pixel);
+                        }
+                    }
+                }
+                let Some(next_x) = cursor_x.checked_add(6) else {
+                    break;
+                };
+                cursor_x = next_x;
+            }
+        }
+    }
+}
+
 #[allow(dead_code)]
 pub fn exercise() {
     let _ = available();
+}
+
+fn framebuffer() -> Option<(usize, usize)> {
+    unsafe {
+        if !read_volatile(addr_of!(AVAILABLE)) {
+            return None;
+        }
+        Some((
+            read_volatile(addr_of!(BUFFER)) as usize,
+            read_volatile(addr_of!(PITCH)) as usize,
+        ))
+    }
+}
+
+fn glyph(character: char) -> [u8; 7] {
+    if character.is_ascii_lowercase() {
+        return match character {
+            'a' => [0, 0, 0b01110, 0b00001, 0b01111, 0b10001, 0b01111],
+            'b' => [0b10000, 0b10000, 0b10110, 0b11001, 0b10001, 0b10001, 0b11110],
+            'c' => [0, 0, 0b01111, 0b10000, 0b10000, 0b10000, 0b01111],
+            'd' => [0b00001, 0b00001, 0b01101, 0b10011, 0b10001, 0b10001, 0b01111],
+            'e' => [0, 0, 0b01110, 0b10001, 0b11111, 0b10000, 0b01111],
+            'f' => [0b00110, 0b01001, 0b01000, 0b11100, 0b01000, 0b01000, 0b01000],
+            'g' => [0, 0, 0b01111, 0b10001, 0b01111, 0b00001, 0b01110],
+            'h' => [0b10000, 0b10000, 0b10110, 0b11001, 0b10001, 0b10001, 0b10001],
+            'i' => [0b00100, 0, 0b01100, 0b00100, 0b00100, 0b00100, 0b01110],
+            'j' => [0b00010, 0, 0b00110, 0b00010, 0b00010, 0b10010, 0b01100],
+            'k' => [0b10000, 0b10000, 0b10010, 0b10100, 0b11000, 0b10100, 0b10010],
+            'l' => [0b01100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110],
+            'm' => [0, 0, 0b11010, 0b10101, 0b10101, 0b10101, 0b10101],
+            'n' => [0, 0, 0b10110, 0b11001, 0b10001, 0b10001, 0b10001],
+            'o' => [0, 0, 0b01110, 0b10001, 0b10001, 0b10001, 0b01110],
+            'p' => [0, 0, 0b11110, 0b10001, 0b11110, 0b10000, 0b10000],
+            'q' => [0, 0, 0b01111, 0b10001, 0b01111, 0b00001, 0b00001],
+            'r' => [0, 0, 0b10111, 0b11000, 0b10000, 0b10000, 0b10000],
+            's' => [0, 0, 0b01111, 0b10000, 0b01110, 0b00001, 0b11110],
+            't' => [0b01000, 0b01000, 0b11100, 0b01000, 0b01000, 0b01001, 0b00110],
+            'u' => [0, 0, 0b10001, 0b10001, 0b10001, 0b10011, 0b01101],
+            'v' => [0, 0, 0b10001, 0b10001, 0b10001, 0b01010, 0b00100],
+            'w' => [0, 0, 0b10001, 0b10101, 0b10101, 0b10101, 0b01010],
+            'x' => [0, 0, 0b10001, 0b01010, 0b00100, 0b01010, 0b10001],
+            'y' => [0, 0, 0b10001, 0b10001, 0b01111, 0b00001, 0b01110],
+            'z' => [0, 0, 0b11111, 0b00010, 0b00100, 0b01000, 0b11111],
+            _ => unreachable!(),
+        };
+    }
+    let uppercase = character.to_ascii_uppercase();
+    match uppercase {
+        'A' => [
+            0b01110, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001,
+        ],
+        'B' => [
+            0b11110, 0b10001, 0b10001, 0b11110, 0b10001, 0b10001, 0b11110,
+        ],
+        'C' => [
+            0b01111, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b01111,
+        ],
+        'D' => [
+            0b11110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b11110,
+        ],
+        'E' => [
+            0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b11111,
+        ],
+        'F' => [
+            0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b10000,
+        ],
+        'G' => [
+            0b01111, 0b10000, 0b10000, 0b10111, 0b10001, 0b10001, 0b01111,
+        ],
+        'H' => [
+            0b10001, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001,
+        ],
+        'I' => [
+            0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b11111,
+        ],
+        'J' => [
+            0b00111, 0b00010, 0b00010, 0b00010, 0b10010, 0b10010, 0b01100,
+        ],
+        'K' => [
+            0b10001, 0b10010, 0b10100, 0b11000, 0b10100, 0b10010, 0b10001,
+        ],
+        'L' => [
+            0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b11111,
+        ],
+        'M' => [
+            0b10001, 0b11011, 0b10101, 0b10101, 0b10001, 0b10001, 0b10001,
+        ],
+        'N' => [
+            0b10001, 0b11001, 0b10101, 0b10011, 0b10001, 0b10001, 0b10001,
+        ],
+        'O' => [
+            0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110,
+        ],
+        'P' => [
+            0b11110, 0b10001, 0b10001, 0b11110, 0b10000, 0b10000, 0b10000,
+        ],
+        'Q' => [
+            0b01110, 0b10001, 0b10001, 0b10001, 0b10101, 0b10010, 0b01101,
+        ],
+        'R' => [
+            0b11110, 0b10001, 0b10001, 0b11110, 0b10100, 0b10010, 0b10001,
+        ],
+        'S' => [
+            0b01111, 0b10000, 0b10000, 0b01110, 0b00001, 0b00001, 0b11110,
+        ],
+        'T' => [
+            0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100,
+        ],
+        'U' => [
+            0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110,
+        ],
+        'V' => [
+            0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01010, 0b00100,
+        ],
+        'W' => [
+            0b10001, 0b10001, 0b10001, 0b10101, 0b10101, 0b11011, 0b10001,
+        ],
+        'X' => [
+            0b10001, 0b10001, 0b01010, 0b00100, 0b01010, 0b10001, 0b10001,
+        ],
+        'Y' => [
+            0b10001, 0b10001, 0b01010, 0b00100, 0b00100, 0b00100, 0b00100,
+        ],
+        'Z' => [
+            0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b10000, 0b11111,
+        ],
+        '0' => [
+            0b01110, 0b10001, 0b10011, 0b10101, 0b11001, 0b10001, 0b01110,
+        ],
+        '1' => [
+            0b00100, 0b01100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110,
+        ],
+        '2' => [
+            0b01110, 0b10001, 0b00001, 0b00010, 0b00100, 0b01000, 0b11111,
+        ],
+        '3' => [
+            0b11110, 0b00001, 0b00001, 0b01110, 0b00001, 0b00001, 0b11110,
+        ],
+        '4' => [
+            0b00010, 0b00110, 0b01010, 0b10010, 0b11111, 0b00010, 0b00010,
+        ],
+        '5' => [
+            0b11111, 0b10000, 0b10000, 0b11110, 0b00001, 0b00001, 0b11110,
+        ],
+        '6' => [
+            0b01110, 0b10000, 0b10000, 0b11110, 0b10001, 0b10001, 0b01110,
+        ],
+        '7' => [
+            0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b01000, 0b01000,
+        ],
+        '8' => [
+            0b01110, 0b10001, 0b10001, 0b01110, 0b10001, 0b10001, 0b01110,
+        ],
+        '9' => [
+            0b01110, 0b10001, 0b10001, 0b01111, 0b00001, 0b00001, 0b01110,
+        ],
+        ' ' => [0; 7],
+        ':' => [
+            0b00000, 0b00100, 0b00100, 0b00000, 0b00100, 0b00100, 0b00000,
+        ],
+        '-' => [
+            0b00000, 0b00000, 0b00000, 0b11111, 0b00000, 0b00000, 0b00000,
+        ],
+        '/' => [
+            0b00001, 0b00010, 0b00010, 0b00100, 0b01000, 0b01000, 0b10000,
+        ],
+        '.' => [
+            0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00110, 0b00110,
+        ],
+        _ => [
+            0b11111, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b11111,
+        ],
+    }
 }
 
 fn negotiate() -> Option<(u64, usize, u32)> {
