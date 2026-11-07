@@ -36,7 +36,9 @@ pub extern "C" fn rust_main() -> ! {
     let id = core_id();
     let arrived = arrived_flags();
     mmu::enable(el);
-    video::init();
+    if !video::init() {
+        uart::puts("video: indisponivel\r\n");
+    }
     timer::start(el);
 
     uart::write_fmt(format_args!(

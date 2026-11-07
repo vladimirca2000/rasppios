@@ -14,6 +14,7 @@
 //! outro espaço: três páginas em `0x3C200000`, fora da RAM e do buraco do
 //! teste `pagina`, apontando para molduras físicas do kernel.
 
+use core::mem::size_of;
 use core::ptr::{addr_of, addr_of_mut, read_volatile, write_volatile};
 
 use crate::uart;
@@ -299,7 +300,10 @@ pub fn map_framebuffer(start: u64, size: usize) -> bool {
     let Some(map_end) = end.checked_add(PAGE - 1).map(|value| value & !(PAGE - 1)) else {
         return false;
     };
-    if map_start < USER_STACK_TOP && map_end > USER_CODE_VA {
+    if map_end <= map_start || map_start < USER_STACK_TOP && map_end > USER_CODE_VA {
+        return false;
+    }
+    if protected_by_kernel_or_tables(map_start, map_end) {
         return false;
     }
 
@@ -313,6 +317,16 @@ pub fn map_framebuffer(start: u64, size: usize) -> bool {
         for l2_index in first_l2..=last_l2 {
             let l3 = addr_of_mut!(L3_FRAMEBUFFER[l2_index]);
             let l2_entry = read_volatile(addr_of!(L2.entries[l2_index]));
+            let user_table = table(addr_of!(L3_USER) as u64);
+            let block_start = (l2_index as u64) * BLOCK;
+            let block_end = block_start + BLOCK;
+            if l2_index == USER_L2
+                && l2_entry == user_table
+                && map_start < block_end
+                && map_end > block_start
+            {
+                return false;
+            }
             let old_table = if l2_index == 0 {
                 table(addr_of!(L3) as u64)
             } else {
@@ -331,8 +345,6 @@ pub fn map_framebuffer(start: u64, size: usize) -> bool {
                 write_volatile(addr_of_mut!((*l3).entries[page]), entry);
             }
 
-            let block_start = (l2_index as u64) * BLOCK;
-            let block_end = block_start + BLOCK;
             let from = map_start.max(block_start);
             let to = map_end.min(block_end);
             let first_page = ((from - block_start) / PAGE) as usize;
@@ -374,8 +386,40 @@ fn block_page_desc(pa: u64, device: bool) -> u64 {
     desc
 }
 
+fn protected_by_kernel_or_tables(start: u64, end: u64) -> bool {
+    let kernel_start = addr_of!(__text_start) as u64;
+    let kernel_end = addr_of!(__stacks_end) as u64;
+    if kernel_end <= kernel_start || ranges_overlap(start, end, kernel_start, kernel_end) {
+        return true;
+    }
+
+    let tables = [
+        (addr_of!(L1) as u64, size_of::<Table>() as u64),
+        (addr_of!(L2) as u64, size_of::<Table>() as u64),
+        (addr_of!(L3) as u64, size_of::<Table>() as u64),
+        (addr_of!(L3_USER) as u64, size_of::<Table>() as u64),
+        (
+            addr_of!(L3_FRAMEBUFFER) as u64,
+            size_of::<[Table; 504]>() as u64,
+        ),
+    ];
+    for (table_start, table_size) in tables {
+        let Some(table_end) = table_start.checked_add(table_size) else {
+            return true;
+        };
+        if ranges_overlap(start, end, table_start, table_end) {
+            return true;
+        }
+    }
+    false
+}
+
+fn ranges_overlap(start: u64, end: u64, other_start: u64, other_end: u64) -> bool {
+    start < end && other_start < other_end && start < other_end && other_start < end
+}
+
 fn framebuffer_page_desc(pa: u64) -> u64 {
-    (pa & !(PAGE - 1)) | VALID_PAGE | AF | SH_INNER | ATTR_NORMAL | XN
+    (pa & !(PAGE - 1)) | VALID_PAGE | AF | SH_INNER | ATTR_NORMAL | PXN | XN
 }
 
 /// `AP[2:1] = 01` grava no EL0. `AP[2:1] = 11` só lê. Bit 54 é `UXN`.

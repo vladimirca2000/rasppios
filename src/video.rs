@@ -1,5 +1,6 @@
 //! Inicialização do framebuffer RGB565 pelo mailbox de propriedades.
 
+use core::mem::size_of;
 use core::ptr::{addr_of, addr_of_mut, read_volatile, write_volatile};
 
 use crate::{mmu, uart};
@@ -11,6 +12,9 @@ const MBOX_FULL: u32 = 1 << 31;
 const MBOX_EMPTY: u32 = 1 << 30;
 const MBOX_CHANNEL: u32 = 8;
 const BUS_ALIAS: u32 = 0xC000_0000;
+const RAM_END: u64 = 0x3C00_0000;
+const QEMU_FRAMEBUFFER_END: u64 = 0x3F00_0000;
+const CACHE_LINE: usize = 64;
 
 const TAG_PHYSICAL_SIZE: u32 = 0x0004_8003;
 const TAG_VIRTUAL_SIZE: u32 = 0x0004_8004;
@@ -27,14 +31,12 @@ static mut MESSAGE: FramebufferMessage = FramebufferMessage { words: [0; 35] };
 static mut AVAILABLE: bool = false;
 static mut PITCH: u32 = 0;
 
-pub fn init() {
+pub fn init() -> bool {
     let Some((start, size, pitch)) = negotiate() else {
-        uart::puts("video: indisponivel\r\n");
-        return;
+        return false;
     };
     if !mmu::map_framebuffer(start, size) {
-        uart::puts("video: indisponivel\r\n");
-        return;
+        return false;
     }
     unsafe {
         write_volatile(addr_of_mut!(PITCH), pitch);
@@ -42,6 +44,7 @@ pub fn init() {
     }
     let _ = available();
     uart::write_fmt(format_args!("video: 640x480 rgb565 stride {pitch}\r\n"));
+    true
 }
 
 pub fn available() -> bool {
@@ -86,6 +89,7 @@ fn negotiate() -> Option<(u64, usize, u32)> {
         write_volatile(words.add(25), 0);
     }
     dsb();
+    cache_clean_message();
 
     if !wait(|status| status & MBOX_FULL == 0) {
         return None;
@@ -99,10 +103,11 @@ fn negotiate() -> Option<(u64, usize, u32)> {
         return None;
     }
     let reply = unsafe { read_volatile(MBOX_READ as *const u32) };
+    dsb();
     if reply & 0xf != MBOX_CHANNEL {
         return None;
     }
-    dsb();
+    cache_invalidate_message();
 
     unsafe {
         let words = addr_of!(MESSAGE.words) as *const u32;
@@ -114,12 +119,16 @@ fn negotiate() -> Option<(u64, usize, u32)> {
         }
         let width = read_volatile(words.add(5));
         let height = read_volatile(words.add(6));
+        let virtual_width = read_volatile(words.add(10));
+        let virtual_height = read_volatile(words.add(11));
         let depth = read_volatile(words.add(15));
         let buffer_bus = read_volatile(words.add(19));
         let buffer_size = read_volatile(words.add(20)) as usize;
         let pitch = read_volatile(words.add(24));
         if width != 640
             || height != 480
+            || virtual_width != 640
+            || virtual_height != 480
             || depth != 16
             || pitch < width * 2
             || buffer_bus & 0xf != 0
@@ -130,15 +139,19 @@ fn negotiate() -> Option<(u64, usize, u32)> {
         if buffer_size < required {
             return None;
         }
-        let buffer_start = if (buffer_bus & 0xC000_0000) == BUS_ALIAS {
-            (buffer_bus & !BUS_ALIAS) as usize
-        } else if buffer_bus < 0x3F00_0000 {
-            buffer_bus as usize
+        let buffer_start = if buffer_bus & BUS_ALIAS == BUS_ALIAS {
+            u64::from(buffer_bus - BUS_ALIAS)
         } else {
-            return None;
+            u64::from(buffer_bus)
         };
-        buffer_start.checked_add(buffer_size)?;
-        Some((buffer_start as u64, buffer_size, pitch))
+        let buffer_end = buffer_start.checked_add(buffer_size as u64)?;
+        let in_qemu_aperture =
+            buffer_start >= RAM_END && buffer_end <= QEMU_FRAMEBUFFER_END;
+        let in_arm_ram = buffer_end <= RAM_END;
+        if !in_qemu_aperture && !in_arm_ram {
+            return None;
+        }
+        Some((buffer_start, buffer_size, pitch))
     }
 }
 
@@ -154,4 +167,39 @@ fn wait(ready: fn(u32) -> bool) -> bool {
 
 fn dsb() {
     unsafe { core::arch::asm!("dsb sy", options(nostack, preserves_flags)) };
+}
+
+fn cache_clean_message() {
+    cache_maintain_message(false);
+}
+
+fn cache_invalidate_message() {
+    cache_maintain_message(true);
+}
+
+fn cache_maintain_message(invalidate: bool) {
+    let message_start = addr_of!(MESSAGE) as usize;
+    let Some(message_end) = message_start.checked_add(size_of::<FramebufferMessage>()) else {
+        return;
+    };
+    let Some(aligned_end) = message_end.checked_add(CACHE_LINE - 1) else {
+        return;
+    };
+    let start = message_start & !(CACHE_LINE - 1);
+    let end = aligned_end & !(CACHE_LINE - 1);
+    let mut line = start;
+    while line < end {
+        unsafe {
+            if invalidate {
+                core::arch::asm!("dc ivac, {line}", line = in(reg) line, options(nostack));
+            } else {
+                core::arch::asm!("dc civac, {line}", line = in(reg) line, options(nostack));
+            }
+        }
+        let Some(next) = line.checked_add(CACHE_LINE) else {
+            break;
+        };
+        line = next;
+    }
+    dsb();
 }
