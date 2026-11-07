@@ -21,8 +21,8 @@ const TAG_VIRTUAL_SIZE: u32 = 0x0004_8004;
 const TAG_DEPTH: u32 = 0x0004_8005;
 const TAG_ALLOCATE_BUFFER: u32 = 0x0004_0001;
 const TAG_PITCH: u32 = 0x0004_0008;
-const WIDTH: i32 = 640;
-const HEIGHT: i32 = 480;
+const REQUESTED_WIDTH: u32 = 640;
+const REQUESTED_HEIGHT: u32 = 480;
 
 pub const BLACK: u16 = 0x0000;
 pub const NAVY: u16 = 0x000F;
@@ -40,9 +40,11 @@ static mut MESSAGE: FramebufferMessage = FramebufferMessage { words: [0; 35] };
 static mut AVAILABLE: bool = false;
 static mut BUFFER: u64 = 0;
 static mut PITCH: u32 = 0;
+static mut WIDTH: u32 = 0;
+static mut HEIGHT: u32 = 0;
 
 pub fn init() -> bool {
-    let Some((start, size, pitch)) = negotiate() else {
+    let Some((start, size, pitch, width, height)) = negotiate() else {
         return false;
     };
     if !mmu::map_framebuffer(start, size) {
@@ -51,6 +53,8 @@ pub fn init() -> bool {
     unsafe {
         write_volatile(addr_of_mut!(BUFFER), start);
         write_volatile(addr_of_mut!(PITCH), pitch);
+        write_volatile(addr_of_mut!(WIDTH), width);
+        write_volatile(addr_of_mut!(HEIGHT), height);
         write_volatile(addr_of_mut!(AVAILABLE), true);
     }
     let _ = available();
@@ -64,24 +68,26 @@ pub fn available() -> bool {
 
 /// Preenche a área visível inteira com uma cor RGB565.
 pub fn clear(color: u16) {
-    rect(0, 0, WIDTH, HEIGHT, color);
+    let (width, height) = dimensions();
+    rect(0, 0, width, height, color);
 }
 
 /// Desenha um retângulo RGB565, recortando-o aos limites da tela.
 pub fn rect(x: i32, y: i32, width: i32, height: i32, color: u16) {
-    let Some((buffer, pitch)) = framebuffer() else {
+    let Some((buffer, pitch, _, _)) = framebuffer() else {
         return;
     };
+    let (screen_width, screen_height) = dimensions();
     let Some(x1) = x.checked_add(width) else {
         return;
     };
     let Some(y1) = y.checked_add(height) else {
         return;
     };
-    let x0 = x.max(0).min(WIDTH);
-    let y0 = y.max(0).min(HEIGHT);
-    let x1 = x1.max(0).min(WIDTH);
-    let y1 = y1.max(0).min(HEIGHT);
+    let x0 = x.max(0).min(screen_width);
+    let y0 = y.max(0).min(screen_height);
+    let x1 = x1.max(0).min(screen_width);
+    let y1 = y1.max(0).min(screen_height);
     if x0 >= x1 || y0 >= y1 {
         return;
     }
@@ -98,9 +104,10 @@ pub fn rect(x: i32, y: i32, width: i32, height: i32, color: u16) {
 
 /// Desenha texto com glifos monocromáticos 5×7 e avanço de seis pixels.
 pub fn text(x: i32, y: i32, text: &str, color: u16, background: u16) {
-    let Some((buffer, pitch)) = framebuffer() else {
+    let Some((buffer, pitch, _, _)) = framebuffer() else {
         return;
     };
+    let (screen_width, screen_height) = dimensions();
     let mut cursor_x = x;
     let mut cursor_y = y;
     for character in text.chars() {
@@ -112,7 +119,7 @@ pub fn text(x: i32, y: i32, text: &str, color: u16, background: u16) {
                     break;
                 };
                 cursor_y = next_y;
-                if cursor_y >= HEIGHT {
+                if cursor_y >= screen_height {
                     break;
                 }
             }
@@ -122,14 +129,14 @@ pub fn text(x: i32, y: i32, text: &str, color: u16, background: u16) {
                     let Some(pixel_y) = cursor_y.checked_add(row as i32) else {
                         continue;
                     };
-                    if pixel_y < 0 || pixel_y >= HEIGHT {
+                    if pixel_y < 0 || pixel_y >= screen_height {
                         continue;
                     }
                     for column in 0..5 {
                         let Some(pixel_x) = cursor_x.checked_add(column) else {
                             continue;
                         };
-                        if pixel_x < 0 || pixel_x >= WIDTH {
+                        if pixel_x < 0 || pixel_x >= screen_width {
                             continue;
                         }
                         let pixel = if bits & (1 << (4 - column)) != 0 {
@@ -152,12 +159,25 @@ pub fn text(x: i32, y: i32, text: &str, color: u16, background: u16) {
     }
 }
 
-#[allow(dead_code)]
-pub fn exercise() {
-    let _ = available();
+pub fn exercise() -> bool {
+    let Some((_, _, width, height)) = framebuffer() else {
+        return false;
+    };
+    if width != REQUESTED_WIDTH || height != REQUESTED_HEIGHT {
+        return false;
+    }
+    clear(NAVY);
+    rect(0, 0, 640, 48, BLUE);
+    rect(32, 96, 176, 112, RED);
+    rect(232, 96, 176, 112, GREEN);
+    rect(432, 96, 176, 112, WHITE);
+    text(24, 16, "rasppios marco 18", WHITE, BLUE);
+    text(48, 240, "framebuffer: 640x480 rgb565", WHITE, NAVY);
+    text(48, 264, "UART continua ativa", WHITE, NAVY);
+    true
 }
 
-fn framebuffer() -> Option<(usize, usize)> {
+fn framebuffer() -> Option<(usize, usize, u32, u32)> {
     unsafe {
         if !read_volatile(addr_of!(AVAILABLE)) {
             return None;
@@ -165,7 +185,18 @@ fn framebuffer() -> Option<(usize, usize)> {
         Some((
             read_volatile(addr_of!(BUFFER)) as usize,
             read_volatile(addr_of!(PITCH)) as usize,
+            read_volatile(addr_of!(WIDTH)),
+            read_volatile(addr_of!(HEIGHT)),
         ))
+    }
+}
+
+fn dimensions() -> (i32, i32) {
+    unsafe {
+        (
+            read_volatile(addr_of!(WIDTH)) as i32,
+            read_volatile(addr_of!(HEIGHT)) as i32,
+        )
     }
 }
 
@@ -330,7 +361,7 @@ fn glyph(character: char) -> [u8; 7] {
     }
 }
 
-fn negotiate() -> Option<(u64, usize, u32)> {
+fn negotiate() -> Option<(u64, usize, u32, u32, u32)> {
     unsafe {
         let words = addr_of_mut!(MESSAGE.words) as *mut u32;
         for index in 0..35 {
@@ -340,13 +371,13 @@ fn negotiate() -> Option<(u64, usize, u32)> {
         write_volatile(words.add(2), TAG_PHYSICAL_SIZE);
         write_volatile(words.add(3), 8);
         write_volatile(words.add(4), 8);
-        write_volatile(words.add(5), 640);
-        write_volatile(words.add(6), 480);
+        write_volatile(words.add(5), REQUESTED_WIDTH);
+        write_volatile(words.add(6), REQUESTED_HEIGHT);
         write_volatile(words.add(7), TAG_VIRTUAL_SIZE);
         write_volatile(words.add(8), 8);
         write_volatile(words.add(9), 8);
-        write_volatile(words.add(10), 640);
-        write_volatile(words.add(11), 480);
+        write_volatile(words.add(10), REQUESTED_WIDTH);
+        write_volatile(words.add(11), REQUESTED_HEIGHT);
         write_volatile(words.add(12), TAG_DEPTH);
         write_volatile(words.add(13), 4);
         write_volatile(words.add(14), 4);
@@ -399,10 +430,10 @@ fn negotiate() -> Option<(u64, usize, u32)> {
         let buffer_bus = read_volatile(words.add(19));
         let buffer_size = read_volatile(words.add(20)) as usize;
         let pitch = read_volatile(words.add(24));
-        if width != 640
-            || height != 480
-            || virtual_width != 640
-            || virtual_height != 480
+        if width != REQUESTED_WIDTH
+            || height != REQUESTED_HEIGHT
+            || virtual_width != REQUESTED_WIDTH
+            || virtual_height != REQUESTED_HEIGHT
             || depth != 16
             || pitch < width * 2
             || buffer_bus & 0xf != 0
@@ -425,7 +456,7 @@ fn negotiate() -> Option<(u64, usize, u32)> {
         if !in_qemu_aperture && !in_arm_ram {
             return None;
         }
-        Some((buffer_start, buffer_size, pitch))
+        Some((buffer_start, buffer_size, pitch, width, height))
     }
 }
 

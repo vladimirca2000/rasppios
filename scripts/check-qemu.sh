@@ -19,7 +19,7 @@ boot_once() {
         -display none \
         -no-reboot >"$out" 2>&1
     set -e
-    grep -q "rasppios: marco 10" "$out" \
+    grep -q "rasppios: marco 17" "$out" \
         && grep -q "mmu: ligada" "$out" \
         && grep -q "nucleo em execucao: 0" "$out" \
         && grep -q "chegada: 0=1" "$out" \
@@ -32,11 +32,18 @@ boot_once() {
 console_once() {
     local out="$1"
     set +e
-    timeout --foreground -k 2 12 python3 - "$out" <<'PY'
-import os, pty, re, select, subprocess, sys, time
+    timeout --foreground -k 2 30 python3 - "$out" <<'PY'
+import os, pty, re, select, socket, subprocess, sys, time
 
 out_path = sys.argv[1]
 img = "boot/kernel8.img"
+mon_path = "/tmp/rasppios-mon.sock"
+try:
+    os.unlink(mon_path)
+except FileNotFoundError:
+    pass
+with open("/tmp/rasppios-sd.img", "wb") as image:
+    image.truncate(4 * 1024 * 1024)
 master, slave = pty.openpty()
 proc = subprocess.Popen(
     [
@@ -45,8 +52,10 @@ proc = subprocess.Popen(
         "-kernel", img,
         "-serial", "null",
         "-serial", "stdio",
-        "-monitor", "none",
         "-display", "none",
+        "-drive", "if=sd,format=raw,file=/tmp/rasppios-sd.img",
+        "-device", "usb-kbd",
+        "-monitor", f"unix:{mon_path},server,nowait",
         "-no-reboot",
     ],
     stdin=slave,
@@ -71,10 +80,13 @@ def read_until(token, timeout=5):
 
 try:
     read_until(b"rasppios>")
+    read_until(b"teclado: hid")
     os.write(master, b"help\r")
-    read_until(b"comandos: help el nucleo eco ticks mem pagina trava tarefas preempcao falha panico")
+    read_until(b"comandos: help ls cat echo run el nucleo eco ticks mem pagina trava tarefas preempcao usuario chamada bloco arquivos roda falha panico")
+    os.write(master, b"tela\r")
+    read_until(b"tela: ok 640x480 rgb565")
     os.write(master, b"el\r")
-    read_until(b"el: EL2")
+    read_until(b"el: EL1")
     os.write(master, b"nucleo\r")
     read_until(b"nucleo: 0 chegada: 0=1 1=0 2=0 3=0")
     os.write(master, b"eco qemu\r")
@@ -154,6 +166,80 @@ try:
     read_until(b"preempcao: alta antes")
     read_until(b"fatias: abababab")
 
+    os.write(master, b"usuario\r")
+    read_until(b"usuario: el0")
+    read_until(b"causa: abort de dados")
+    read_until(b"esr: 0x9200000f")
+    read_until(b"far: 0x0000000000080000")
+    read_until(b"proprio: ok")
+    read_until(b"modo: EL0")
+    read_until(b"usuario: kernel negado")
+
+    os.write(master, b"chamada\r")
+    read_until(b"saida: ok")
+    os.write(master, b"Z")
+    read_until(b"ponteiro: negado")
+    read_until(b"entrada: Z")
+    read_until(b"fim: 0")
+    tempo = re.search(rb"tempo: (\d+)\r*\n", buf)
+    if tempo is None or int(tempo.group(1)) < c2:
+        sys.stderr.write(buf.decode("utf-8", "replace"))
+        raise SystemExit(f"tempo invalido depois de clo {c2}")
+
+    mark = len(buf)
+    end = time.time() + 3
+    while b"rasppios>" not in buf[mark:] and time.time() < end and proc.poll() is None:
+        ready, _, _ = select.select([master], [], [], 0.2)
+        if ready:
+            buf += os.read(master, 4096)
+    mon = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    mon.settimeout(0.3)
+    mon.connect(mon_path)
+    time.sleep(0.1)
+    try:
+        mon.recv(512)
+    except socket.timeout:
+        pass
+
+    def tap(name):
+        mon.send(f"sendkey {name} 250\n".encode())
+        time.sleep(0.4)
+
+    for name in ("e", "c", "o", "spc", "u", "s", "b", "ret"):
+        tap(name)
+    read_until(b"eco: usb")
+    mon.close()
+
+    os.write(master, b"bloco\r")
+    read_until(b"leitura: 00000000")
+    read_until(b"escrita: ok")
+    read_until(b"restauro: ok")
+
+    os.write(master, b"arquivos\r")
+    read_until(b"montagem: nova")
+    read_until(b"lista: ola notas")
+    read_until(b"leitura: rasppios")
+    read_until(b"sub: dentro")
+
+    os.write(master, b"roda\r")
+    read_until(b"roda: gravou")
+    read_until(b"app: ok")
+    read_until(b"saida: 7")
+
+    os.write(master, b"ls\r")
+    read_until(b"ls: ola notas prog")
+    os.write(master, b"ls notas\r")
+    read_until(b"ls: item")
+    os.write(master, b"cat ola\r")
+    read_until(b"cat: rasppios")
+    os.write(master, b"cat notas/item\r")
+    read_until(b"cat: dentro")
+    os.write(master, b"echo shell\r")
+    read_until(b"echo: shell")
+    os.write(master, b"run prog\r")
+    read_until(b"run: prog")
+    read_until(b"run: ok 7")
+
     os.write(master, b"falha\r")
     read_until(b"excecao: sincrono")
     read_until(b"causa: brk")
@@ -178,10 +264,78 @@ PY
     return "$status"
 }
 
+persist_once() {
+    local out="$1"
+    set +e
+    timeout --foreground -k 2 20 python3 - "$out" <<'PY'
+import os, pty, select, subprocess, sys, time
+
+out_path = sys.argv[1]
+master, slave = pty.openpty()
+proc = subprocess.Popen(
+    [
+        "qemu-system-aarch64",
+        "-M", "raspi3b",
+        "-kernel", "boot/kernel8.img",
+        "-serial", "null",
+        "-serial", "stdio",
+        "-display", "none",
+        "-drive", "if=sd,format=raw,file=/tmp/rasppios-sd.img",
+        "-monitor", "none",
+        "-no-reboot",
+    ],
+    stdin=slave,
+    stdout=slave,
+    stderr=slave,
+    close_fds=True,
+)
+os.close(slave)
+buf = b""
+
+def read_until(token, timeout=8):
+    global buf
+    end = time.time() + timeout
+    while token not in buf:
+        if time.time() > end or proc.poll() is not None:
+            sys.stderr.write(buf.decode("utf-8", "replace"))
+            raise SystemExit(f"timeout esperando {token!r}")
+        ready, _, _ = select.select([master], [], [], 0.2)
+        if ready:
+            buf += os.read(master, 4096)
+
+try:
+    read_until(b"rasppios>")
+    os.write(master, b"arquivos\r")
+    read_until(b"montagem: pronta")
+    read_until(b"lista: ola notas")
+    read_until(b"leitura: rasppios")
+    read_until(b"sub: dentro")
+    read_until(b"persistiu: ok")
+    os.write(master, b"roda\r")
+    read_until(b"roda: disco")
+    read_until(b"app: ok")
+    read_until(b"saida: 7")
+finally:
+    proc.terminate()
+    try:
+        proc.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+    text = buf.decode("utf-8", "replace")
+    with open(out_path, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    os.close(master)
+PY
+    local status=$?
+    set -e
+    return "$status"
+}
+
 OUT1="$(mktemp)"
 OUT2="$(mktemp)"
 OUT3="$(mktemp)"
-trap 'rm -f "$OUT1" "$OUT2" "$OUT3"' EXIT
+OUT4="$(mktemp)"
+trap 'rm -f "$OUT1" "$OUT2" "$OUT3" "$OUT4"' EXIT
 
 if ! boot_once "$OUT1" || ! boot_once "$OUT2"; then
     echo "falha: boot do nucleo 0 nao repetiu no QEMU raspi3b"
@@ -199,5 +353,14 @@ if ! console_once "$OUT3"; then
     exit 1
 fi
 
+if ! persist_once "$OUT4"; then
+    echo "falha: o cartao nao preservou os arquivos depois de reiniciar"
+    echo "---- reinicio ----"
+    cat "$OUT4"
+    exit 1
+fi
+
 echo "ok: QEMU raspi3b iniciou kernel8.img duas vezes e o console respondeu"
 cat "$OUT3"
+echo "---- reinicio ----"
+cat "$OUT4"
