@@ -2,6 +2,11 @@
 
 ## Correções da revisão
 
+- O framebuffer é memória normal cacheável: `video::exercise()` limpa as
+  linhas de cache do intervalo retornado com `dc cvac`, alinhamento de 64
+  bytes e `dsb sy` antes de devolver o console. A negociação rejeita
+  explicitamente tamanhos de framebuffer que não sejam múltiplos da linha de
+  cache; o tamanho QEMU `640x480x2` permanece aceito.
 - A mídia atual é `/dev/sda1` em FAT32 (`vfat`), montada em
   `/media/vladimir/PENDRIVE`. `make write` apenas copia os arquivos e não
   formata. A conversão exFAT→FAT32 ocorreu uma única vez antes dos testes e
@@ -65,3 +70,14 @@ formatar, copiando os cinco arquivos de boot para `/dev/sda1` em FAT32.
 - `git diff --check`: passou.
 - Lint de `agent.md`: nenhum erro.
 - Commit: correção documental registrada no histórico.
+
+## Correção dos achados Important
+
+- `cargo build --release`: passou; permanece o warning preexistente de
+  `BLACK` não usado.
+- `git diff --check`: passou.
+- Lint de `src/video.rs` e deste relatório: nenhum erro.
+- `make check`: executado, mas o primeiro QEMU de `scripts/check-qemu.sh`
+  ficou preso consumindo CPU e não produziu saída final; foi encerrado sem
+  resultado. O bloqueio é o mesmo comportamento de QEMU já registrado acima,
+  não um aceite inventado.

@@ -39,6 +39,7 @@ struct FramebufferMessage {
 static mut MESSAGE: FramebufferMessage = FramebufferMessage { words: [0; 35] };
 static mut AVAILABLE: bool = false;
 static mut BUFFER: u64 = 0;
+static mut BUFFER_SIZE: usize = 0;
 static mut PITCH: u32 = 0;
 static mut WIDTH: u32 = 0;
 static mut HEIGHT: u32 = 0;
@@ -52,6 +53,7 @@ pub fn init() -> bool {
     }
     unsafe {
         write_volatile(addr_of_mut!(BUFFER), start);
+        write_volatile(addr_of_mut!(BUFFER_SIZE), size);
         write_volatile(addr_of_mut!(PITCH), pitch);
         write_volatile(addr_of_mut!(WIDTH), width);
         write_volatile(addr_of_mut!(HEIGHT), height);
@@ -174,7 +176,7 @@ pub fn exercise() -> bool {
     text(24, 16, "rasppios marco 18", WHITE, BLUE);
     text(48, 240, "framebuffer: 640x480 rgb565", WHITE, NAVY);
     text(48, 264, "UART continua ativa", WHITE, NAVY);
-    true
+    flush_framebuffer()
 }
 
 fn framebuffer() -> Option<(usize, usize, u32, u32)> {
@@ -444,6 +446,9 @@ fn negotiate() -> Option<(u64, usize, u32, u32, u32)> {
         if buffer_size < required {
             return None;
         }
+        if buffer_size & (CACHE_LINE - 1) != 0 {
+            return None;
+        }
         let buffer_start = if buffer_bus & BUS_ALIAS == BUS_ALIAS {
             u64::from(buffer_bus - BUS_ALIAS)
         } else {
@@ -480,6 +485,40 @@ fn cache_clean_message() {
 
 fn cache_invalidate_message() {
     cache_maintain_message(true);
+}
+
+/// Limpa o framebuffer normal cacheável antes de devolver o controle ao
+/// console, para que o VideoCore veja todos os pixels da cena.
+fn flush_framebuffer() -> bool {
+    let Some((buffer, _, _, _)) = framebuffer() else {
+        return false;
+    };
+    let size = unsafe { read_volatile(addr_of!(BUFFER_SIZE)) };
+    if size == 0 {
+        return false;
+    }
+    let Some(end) = buffer.checked_add(size) else {
+        return false;
+    };
+    let start = buffer & !(CACHE_LINE - 1);
+    let Some(aligned_end) = end.checked_add(CACHE_LINE - 1) else {
+        return false;
+    };
+    let end = aligned_end & !(CACHE_LINE - 1);
+    let mut line = start;
+    while line < end {
+        unsafe {
+            core::arch::asm!("dc cvac, {line}", line = in(reg) line, options(nostack));
+        }
+        let Some(next) = line.checked_add(CACHE_LINE) else {
+            return false;
+        };
+        line = next;
+    }
+    unsafe {
+        core::arch::asm!("dsb sy", options(nostack, preserves_flags));
+    }
+    true
 }
 
 fn cache_maintain_message(invalidate: bool) {
