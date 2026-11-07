@@ -454,6 +454,9 @@ fn negotiate() -> Option<(u64, usize, u32, u32, u32)> {
         } else {
             u64::from(buffer_bus)
         };
+        if buffer_start & (CACHE_LINE as u64 - 1) != 0 {
+            return None;
+        }
         let buffer_end = buffer_start.checked_add(buffer_size as u64)?;
         let in_qemu_aperture =
             buffer_start >= RAM_END && buffer_end <= QEMU_FRAMEBUFFER_END;

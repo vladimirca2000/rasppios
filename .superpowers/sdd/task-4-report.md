@@ -81,3 +81,18 @@ formatar, copiando os cinco arquivos de boot para `/dev/sda1` em FAT32.
   ficou preso consumindo CPU e não produziu saída final; foi encerrado sem
   resultado. O bloqueio é o mesmo comportamento de QEMU já registrado acima,
   não um aceite inventado.
+
+## Correção do achado restante da revisão
+
+- `src/video.rs` agora rejeita o endereço ARM final do framebuffer quando ele
+  não está alinhado a 64 bytes, depois da remoção do alias BUS. A validação
+  existente de endereço mailbox alinhado a 16 bytes e de tamanho múltiplo de
+  64 foi preservada; o endereço retornado pelo QEMU continua dentro do
+  contrato aceito.
+- `cargo build --release`: passou; permanece o warning preexistente de
+  `BLACK` não usado.
+- `git diff --check`: passou.
+- Lint de `src/video.rs` e deste relatório: nenhum erro.
+- `make check`: reproduziu o bloqueio ambiental do harness/QEMU, sem produzir
+  resultado final; o processo foi encerrado e isso não foi contado como
+  aceite.
