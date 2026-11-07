@@ -26,7 +26,7 @@ qemu-system-aarch64 -M raspi3b -kernel boot/kernel8.img \
 make write DEST=/media/vladimir/PENDRIVE
 ```
 
-Confirmar com `findmnt -n -o SOURCE,FSTYPE,TARGET /media/vladimir/PENDRIVE` que o destino é `/dev/sda1 vfat /media/vladimir/PENDRIVE` e que a origem não é `nvme`. A cópia recusa outro sistema de arquivos e recusa os NVMe. Não usar `scripts/write-drive.sh`. Se o cartão não estiver montado, não inventar outro destino.
+Confirmar com `findmnt -n -o SOURCE,FSTYPE,TARGET /media/vladimir/PENDRIVE` que o destino é `/dev/sda1 vfat /media/vladimir/PENDRIVE` e que a origem não é `nvme`. A cópia aceita `vfat` e `exfat`, não formata e recusa dispositivos `nvme` e `mmcblk0`. Não usar `scripts/write-drive.sh`. Se o cartão não estiver montado, não inventar outro destino.
 
 ## Estado atual
 

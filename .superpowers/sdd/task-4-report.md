@@ -55,3 +55,13 @@ formatar, copiando os cinco arquivos de boot para `/dev/sda1` em FAT32.
 - A execução atual de `make check` não produziu resultado final porque o
   processo QEMU/harness ficou preso no ambiente; isso deve ser revalidado em
   um ambiente em que o encerramento do QEMU funcione.
+
+## Correção final da Task 4
+
+- `agent.md` agora descreve fielmente `scripts/install-boot.sh`: `make write`
+  aceita `vfat` e `exfat`, não formata e recusa dispositivos `nvme` e
+  `mmcblk0`.
+- A documentação FAT32 atual do cartão foi preservada.
+- `git diff --check`: passou.
+- Lint de `agent.md`: nenhum erro.
+- Commit: correção documental registrada no histórico.
