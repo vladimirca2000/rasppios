@@ -1,0 +1,10 @@
+# rasppios — Raspberry Pi 3B+
+# O firmware oficial carrega kernel8.img em 0x80000 e entra em AArch64.
+arm_64bit=1
+kernel=kernel8.img
+
+# MiniUART nos pinos GPIO14 (TX) e GPIO15 (RX). O PL011 fica no Bluetooth.
+enable_uart=1
+
+# Trava o clock do núcleo em 250 MHz para o divisor 270 valer 115200 baud.
+core_freq=250

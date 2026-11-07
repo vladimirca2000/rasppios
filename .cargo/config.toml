@@ -1,0 +1,10 @@
+[build]
+target = "aarch64-unknown-none"
+
+[target.aarch64-unknown-none]
+rustflags = [
+    "-C", "link-arg=-Tkernel.ld",
+    "-C", "link-arg=--no-undefined",
+]
+# `cargo run` recebe o ELF e chama o QEMU.
+runner = "bash scripts/qemu.sh"

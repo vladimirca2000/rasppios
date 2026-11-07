@@ -1,0 +1,23 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"path": "../../../rpi-os/boot"
+		},
+		{
+			"path": "../../../rpi-os/docs"
+		},
+		{
+			"path": "../../../rpi-os/scripts"
+		},
+		{
+			"path": "../../../rpi-os/src"
+		},
+		{
+			"path": "../../../rpi-os/target"
+		}
+	],
+	"settings": {}
+}

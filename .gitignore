@@ -1,0 +1,6 @@
+/target
+/boot/bootcode.bin
+/boot/start.elf
+/boot/fixup.dat
+/boot/kernel8.img
+/*.img

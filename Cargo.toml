@@ -1,0 +1,16 @@
+[package]
+name = "rasppios"
+version = "0.1.0"
+edition = "2021"
+description = "Kernel bare-metal AArch64 para Raspberry Pi 3B+"
+
+[dependencies]
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+opt-level = "s"
+lto = true
+codegen-units = 1
