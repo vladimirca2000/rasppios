@@ -1,12 +1,25 @@
 # Relatório da Task 4 — Marco 18
 
+## Correções da revisão
+
+- A mídia atual é `/dev/sda1` em FAT32 (`vfat`), montada em
+  `/media/vladimir/PENDRIVE`. `make write` apenas copia os arquivos e não
+  formata. A conversão exFAT→FAT32 ocorreu uma única vez antes dos testes e
+  foi registrada separadamente.
+- `make image` foi documentado como imagem de teste exFAT, conforme
+  `scripts/image.sh`; nenhum script foi alterado.
+- A saída esperada do kernel atual foi corrigida de `rasppios: marco 15` para
+  `rasppios: marco 17`.
+- O aceite permanece: QEMU feito, Pi aberto. O vídeo físico ainda aguarda
+  teste no monitor do Pi 3B+.
+
 ## Status
 
 DONE — documentação e registro de aceite atualizados.
 
 ## Commit
 
-`docs: registra aceite do marco 18` (hash informado no handoff final).
+`2b0d83d docs: corrige achados da revisão da task 4`.
 
 ## Arquivos
 
@@ -26,6 +39,7 @@ DONE — documentação e registro de aceite atualizados.
 - Lint do editor para os arquivos documentais: nenhum erro.
 - `findmnt -n -o SOURCE,FSTYPE,TARGET /media/vladimir/PENDRIVE`: confirmou
   `/dev/sda1 vfat /media/vladimir/PENDRIVE`.
+- `scripts/image.sh`: conferido; continua usando `mkfs.exfat`.
 - Reprodução visual QEMU: confirmada anteriormente nas Tasks 1–3, com
   `video: 640x480 rgb565 stride 1280` e `tela: ok 640x480 rgb565`.
 

@@ -16,10 +16,13 @@ carrega `kernel8.img`; o sistema daqui em diante é nosso.
 - O cartão SD de teste no adaptador USB (`/dev/sda1`, FAT32, montado em
   `/media/vladimir/PENDRIVE`) recebe `bootcode.bin`, `start.elf`, `fixup.dat`,
   `config.txt` e `kernel8.img`
-  sem ser reformatado. `rasppios.img` é uma amostra exFAT de 64 MiB com os
-  mesmos arquivos. O kernel ainda não lê exFAT.
+  sem ser reformatado. `rasppios.img` é uma imagem de teste exFAT de 64 MiB
+  com os mesmos arquivos, gerada pelo script atual; o kernel ainda não lê
+  exFAT.
 
-Em 2026-11-06 o Pi 3B+ iniciou esse cartão pelo adaptador USB e a UART física mostrou o banner. Depois, a partição foi reformatada em FAT32 para permitir o boot pelo slot SD. A documentação de boot descreve a partição de carregamento como FAT/FAT32.
+Antes dos testes, a partição foi convertida uma vez de exFAT para FAT32 para
+permitir o boot pelo slot SD. Desde então, o cartão permanece em FAT32. A
+documentação de boot descreve a partição de carregamento como FAT/FAT32.
 
 ### Marco 2 — um núcleo no kernel
 
@@ -191,7 +194,7 @@ make check
 Saída esperada de `make check` (sobe `boot/kernel8.img`, o mesmo arquivo do cartão):
 
 ```
-rasppios: marco 15
+rasppios: marco 17
 kernel AArch64 carregado em 0x80000
 exception level: EL1
 nucleo em execucao: 0
@@ -253,9 +256,11 @@ formato como está:
 make write DEST=/media/vladimir/PENDRIVE
 ```
 
-`make image` gera `rasppios.img`, uma amostra FAT32 de 64 MiB com os mesmos
-cinco arquivos. O firmware, quando encontra o volume, carrega o kernel em
-`0x80000`.
+`make image` gera `rasppios.img`, uma imagem de teste exFAT de 64 MiB com os
+mesmos cinco arquivos, conforme `scripts/image.sh`. O firmware do Pi exige
+FAT32 no cartão usado para o boot; `make write` copia os arquivos para a mídia
+montada sem formatá-la. Quando encontra o volume, o firmware carrega o kernel
+em `0x80000`.
 
 ## Documentação do Pi 3B+
 
@@ -284,7 +289,7 @@ Não ligue 3,3 V nem 5 V do adaptador. Terminal: `picocom -b 115200 /dev/ttyUSB0
 
 Em `.cursor/skills/`:
 
-- `rasppios-etapa` — atualizar `agent.md` e este arquivo, rodar `make check` e copiar para o exFAT.
+- `rasppios-etapa` — atualizar `agent.md` e este arquivo, rodar `make check` e copiar para o cartão FAT32.
 - `rasppios-bcm2837` — endereço `0x80000`, miniUART, EL2/EL3 e a base `0x3F00_0000`.
 
 ## Layout
