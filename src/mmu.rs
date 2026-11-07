@@ -275,13 +275,7 @@ pub fn map_user(code_pa: u64, data_pa: u64, stack_pa: u64) -> bool {
         write_volatile(l3.add(1), user_page(data_pa, true));
         write_volatile(l3.add(2), user_page(stack_pa, true));
         write_volatile(l2, expect);
-        core::arch::asm!(
-            "dsb sy",
-            "tlbi vmalle1",
-            "dsb sy",
-            "isb",
-            options(nostack),
-        );
+        core::arch::asm!("dsb sy", "tlbi vmalle1", "dsb sy", "isb", options(nostack),);
     }
     true
 }
@@ -355,15 +349,9 @@ pub fn map_framebuffer(start: u64, size: usize) -> bool {
             let last_page = ((to - block_start) / PAGE) as usize;
             for page in first_page..last_page {
                 let pa = block_start + (page as u64) * PAGE;
-                write_volatile(
-                    addr_of_mut!((*l3).entries[page]),
-                    framebuffer_page_desc(pa),
-                );
+                write_volatile(addr_of_mut!((*l3).entries[page]), framebuffer_page_desc(pa));
             }
-            write_volatile(
-                addr_of_mut!(L2.entries[l2_index]),
-                table_desc(l3 as u64),
-            );
+            write_volatile(addr_of_mut!(L2.entries[l2_index]), table_desc(l3 as u64));
         }
 
         core::arch::asm!("dsb sy", options(nostack, preserves_flags));

@@ -6,14 +6,23 @@
 //!
 //! Classe 0x25 é abort de dados neste nível. Com IL e DFSC `0b000110`
 //! (falha de tradução no nível 2) o syndrome do buraco é `0x96000006`.
+//!
+//! Classe 0x24 é abort de dados vindo de um nível inferior. Com IL e DFSC
+//! `0b001111` (falha de permissão no nível 3) a sonda do EL0 a `0x80000`
+//! produz `0x9200000f`.
+//!
+//! Classe 0x15 é `SVC` vindo do EL0. O `ELR` já aponta para a instrução
+//! seguinte; a chamada só preenche `x0` e volta.
 
 use core::arch::global_asm;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::mmu;
 use crate::sched;
+use crate::syscall;
 use crate::timer;
 use crate::uart;
+use crate::user;
 
 global_asm!(include_str!("vectors.s"));
 
@@ -22,6 +31,7 @@ unsafe extern "C" {
 }
 
 const EC_SHIFT: u64 = 26;
+const EC_SVC: u64 = 0x15;
 const EC_BRK: u64 = 0x3c;
 const EC_DATA_ABORT: u64 = 0x25;
 
@@ -80,6 +90,28 @@ pub extern "C" fn exception_entry(frame: *mut Frame, kind: u64, sp: u64) {
         sched::on_tick();
         return;
     }
+    if kind == 0 && user::from_el0(frame.spsr) && ec(frame.esr) == EC_SVC {
+        match syscall::dispatch(frame.x[8], frame.x[0], frame.x[1]) {
+            syscall::Reply::Value(value) => {
+                // No SVC o hardware já aponta o ELR para a instrução seguinte.
+                frame.x[0] = value;
+            }
+            syscall::Reply::Exit => {
+                frame.elr = user::kernel_return();
+                frame.spsr = user::RETURN_SPSR;
+            }
+        }
+        IN_HANDLER.store(false, Ordering::SeqCst);
+        return;
+    }
+    if kind == 0 && user::from_el0(frame.spsr) {
+        report(frame, kind, sp);
+        user::note(frame.esr, frame.far, frame.spsr);
+        frame.elr = user::kernel_return();
+        frame.spsr = user::RETURN_SPSR;
+        IN_HANDLER.store(false, Ordering::SeqCst);
+        return;
+    }
     report(frame, kind, sp);
     if kind == 0 && returns_to_caller(frame) {
         frame.elr = frame.elr.wrapping_add(4);
@@ -133,6 +165,7 @@ fn kind_name(kind: u64) -> &'static str {
 
 fn cause(esr: u64) -> &'static str {
     match ec(esr) {
+        0x07 => "simd",
         0x15 => "svc",
         0x16 => "hvc",
         0x17 => "smc",

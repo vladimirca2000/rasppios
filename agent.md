@@ -64,7 +64,7 @@ Confirmar com `findmnt -n -o SOURCE,FSTYPE,TARGET /media/vladimir/PENDRIVE` que 
 
 **Marco 17 no QEMU: feito. No Pi: aberto.** O console responde a `ls`, `cat`, `echo` e `run`, além dos diagnósticos que já existiam. `eco` continua valendo o mesmo que `echo`. `ls` lista a raiz ou um diretório, `cat` lê um arquivo, inclusive `notas/item`, e `run prog` carrega a imagem `RPEX` que já está no cartão. A sequência automatizada viu `ls: ola notas prog`, `ls: item`, `cat: rasppios`, `cat: dentro`, `echo: shell` e `run: ok 7`. O teclado USB entra na mesma linha do serial. A escrita agora espera a FSM do SDHOST e o CMD13 até o cartão voltar ao estado `tran`, e a FIFO fica no limiar 4 do defeito de silício. Se `roda` formatar o cartão antes, `arquivos` completa `ola` e `notas` sem apagar o `prog`. O nome curto `arquivo` chama o mesmo comando. O cartão foi reformatado em FAT32 e recebeu novamente os arquivos de boot; isso apagou o RPFS. Falta agora, no Pi, executar `arquivos`, `ls`, `ls notas`, `cat ola`, `cat notas/item`, `echo shell` e `run prog`, e enviar a UART para fechar o marco.
 
-**Marco 18 no QEMU: feito. No Pi: aberto.** O framebuffer negociado no QEMU `raspi3b` é `640x480`, RGB565, com `stride 1280`. A cena fixa tem fundo azul-escuro, faixa azul, três retângulos e os textos `rasppios marco 18`, `framebuffer: 640x480 rgb565` e `UART continua ativa`; a UART continua na aba `serial1`. A reprodução visual usa:
+**Marco 18 no QEMU: feito. No Pi: feito.** O framebuffer negociado no QEMU `raspi3b` e no Raspberry Pi 3B+ é `640x480`, RGB565, com `stride 1280`. A cena fixa tem fundo azul-escuro, faixa azul, três retângulos e os textos `rasppios marco 18`, `framebuffer: 640x480 rgb565` e `UART continua ativa`; ela é desenhada automaticamente durante a carga, antes do prompt. O comando `tela` redesenha a mesma cena. Em 2026-11-07, o monitor físico exibiu a mesma cena esperada após o kernel atual ser gravado no cartão FAT32. A UART continua na aba `serial1`. A reprodução visual usa:
 
 ```bash
 qemu-system-aarch64 -M raspi3b -kernel boot/kernel8.img \
@@ -73,7 +73,7 @@ qemu-system-aarch64 -M raspi3b -kernel boot/kernel8.img \
   -monitor none -display gtk,show-tabs=on,zoom-to-fit=on -no-reboot
 ```
 
-Na aba `serial1`, `tela` responde `tela: ok 640x480 rgb565`; na aba `bcm2835-fb`, a cena foi confirmada. Ainda não há evidência física do monitor no Pi 3B+, portanto o aceite de vídeo no hardware permanece aberto.
+Na aba `serial1`, `tela` responde `tela: ok 640x480 rgb565`; na aba `bcm2835-fb`, a cena foi confirmada. O mesmo desenho foi confirmado no monitor físico do Pi 3B+.
 
 Mídia de teste: `/dev/sda` de 29,7 GB, um cartão SD num adaptador USB, partição `/dev/sda1` montada em `/media/vladimir/PENDRIVE`. Antes dos testes, uma única conversão exFAT→FAT32 foi feita nessa partição; desde então, o cartão permanece em FAT32, tipo `W95 FAT32 (LBA)`, rótulo `PENDRIVE`. O `make write` copia os cinco arquivos de boot sem formatar e, no procedimento atual, o destino esperado é `/dev/sda1` em FAT32.
 

@@ -98,11 +98,21 @@ pub fn putc(byte: u8) {
 
 /// Bloqueia até a FIFO de recepção ter um símbolo e devolve os 8 bits de baixo.
 pub fn getc() -> u8 {
-    unsafe {
-        while (rd(AUX_MU_LSR) & LSR_RX_READY) == 0 {
-            core::hint::spin_loop();
+    loop {
+        if let Some(byte) = try_getc() {
+            return byte;
         }
-        rd(AUX_MU_IO) as u8
+        core::hint::spin_loop();
+    }
+}
+
+/// Um byte da FIFO, se já houver algum. Não espera.
+pub fn try_getc() -> Option<u8> {
+    unsafe {
+        if (rd(AUX_MU_LSR) & LSR_RX_READY) == 0 {
+            return None;
+        }
+        Some(rd(AUX_MU_IO) as u8)
     }
 }
 

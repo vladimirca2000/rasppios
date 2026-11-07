@@ -171,7 +171,7 @@ Ainda falta, para fechar o Marco 17 no hardware: repetir essa sequência na UART
 ### Marco 18 — saída gráfica
 
 - O framebuffer negociado no QEMU `raspi3b` é `640x480`, RGB565, com `stride 1280`.
-- O comando `tela` desenha fundo azul-escuro, faixa azul, três retângulos e os textos `rasppios marco 18`, `framebuffer: 640x480 rgb565` e `UART continua ativa`.
+- Durante a carga, o kernel desenha automaticamente fundo azul-escuro, faixa azul, três retângulos e os textos `rasppios marco 18`, `framebuffer: 640x480 rgb565` e `UART continua ativa`; o comando `tela` redesenha a mesma cena.
 - No QEMU, a resposta `tela: ok 640x480 rgb565` fica na aba `serial1`; a cena fica na aba `bcm2835-fb`.
 
 Reprodução visual no QEMU:
@@ -183,7 +183,7 @@ qemu-system-aarch64 -M raspi3b -kernel boot/kernel8.img \
   -monitor none -display gtk,show-tabs=on,zoom-to-fit=on -no-reboot
 ```
 
-Ainda não há evidência física do monitor no Raspberry Pi 3B+; o aceite de vídeo no hardware permanece aberto.
+Em 2026-11-07, o monitor físico do Raspberry Pi 3B+ exibiu a mesma cena automaticamente durante a carga. O Marco 18 está aceito no QEMU e no Pi.
 
 ## Compilar e testar no QEMU
 

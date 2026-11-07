@@ -1,7 +1,7 @@
 //! Tarefas de kernel, troca cooperativa e preempção pelo timer.
 //!
-//! A troca guarda `x19`–`x28`, `x29`, `x30` e o `sp`. A FPU fica de fora
-//! porque `CPTR_EL2.TFP` ainda prende `d8`–`d15`.
+//! A troca guarda `x19`–`x28`, `x29`, `x30` e o `sp`. Não guarda `v8`–`v15`:
+//! o compilador pode usar SIMD dentro de uma função, mas não através do `yield`.
 //!
 //! Com a preempção ligada, a IRQ do timer escolhe a tarefa pronta de maior
 //! prioridade. Empate alterna. O console fica na prioridade 0.
@@ -33,10 +33,34 @@ static mut STACK_A: Stack = Stack { bytes: [0; 4096] };
 static mut STACK_B: Stack = Stack { bytes: [0; 4096] };
 static mut STACK_C: Stack = Stack { bytes: [0; 4096] };
 static mut THREADS: [Thread; SLOTS] = [
-    Thread { sp: 0, active: false, done: false, priority: 0, leave_masked: false },
-    Thread { sp: 0, active: false, done: false, priority: 0, leave_masked: false },
-    Thread { sp: 0, active: false, done: false, priority: 0, leave_masked: false },
-    Thread { sp: 0, active: false, done: false, priority: 0, leave_masked: false },
+    Thread {
+        sp: 0,
+        active: false,
+        done: false,
+        priority: 0,
+        leave_masked: false,
+    },
+    Thread {
+        sp: 0,
+        active: false,
+        done: false,
+        priority: 0,
+        leave_masked: false,
+    },
+    Thread {
+        sp: 0,
+        active: false,
+        done: false,
+        priority: 0,
+        leave_masked: false,
+    },
+    Thread {
+        sp: 0,
+        active: false,
+        done: false,
+        priority: 0,
+        leave_masked: false,
+    },
 ];
 static mut CURRENT: usize = 0;
 static mut TRACE: [u8; 8] = [0; 8];
@@ -108,7 +132,11 @@ pub fn exercise() {
         )
     };
     let ordem = trace_str(len);
-    let word = if preserved && len == 8 { "ok" } else { "falhou" };
+    let word = if preserved && len == 8 {
+        "ok"
+    } else {
+        "falhou"
+    };
     uart::write_fmt(format_args!(
         "tarefas: a {a} b {b}\r\n\
          ordem: {ordem}\r\n\
@@ -213,7 +241,11 @@ fn yield_now() {
 fn switch_to(prev: usize, next: usize) {
     unsafe {
         addr_of_mut!(CURRENT).write(next);
-        let unmask = if addr_of!(THREADS[next].leave_masked).read() { 0 } else { 1 };
+        let unmask = if addr_of!(THREADS[next].leave_masked).read() {
+            0
+        } else {
+            1
+        };
         context_switch(
             addr_of_mut!(THREADS[prev].sp),
             addr_of!(THREADS[next].sp),
@@ -245,9 +277,7 @@ fn next_index(prev: usize) -> usize {
 }
 
 fn eligible(slot: usize) -> bool {
-    unsafe {
-        addr_of!(THREADS[slot].active).read() && !addr_of!(THREADS[slot].done).read()
-    }
+    unsafe { addr_of!(THREADS[slot].active).read() && !addr_of!(THREADS[slot].done).read() }
 }
 
 fn task_a() {
@@ -267,7 +297,11 @@ fn run(slot: usize, magic: u64, label: u8, first: bool) {
         token = token.wrapping_add(1);
         push(label);
         unsafe {
-            let count = if first { addr_of_mut!(COUNT_A) } else { addr_of_mut!(COUNT_B) };
+            let count = if first {
+                addr_of_mut!(COUNT_A)
+            } else {
+                addr_of_mut!(COUNT_B)
+            };
             count.write(count.read() + 1);
         }
         yield_now();

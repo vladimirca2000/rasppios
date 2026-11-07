@@ -88,9 +88,8 @@ pub fn init() {
 }
 
 pub fn report() {
-    let (arm_base, arm_end, mailbox, heap_start, heap_end) = unsafe {
-        (ARM_BASE, ARM_END, FROM_MAILBOX, HEAP_START, HEAP_END)
-    };
+    let (arm_base, arm_end, mailbox, heap_start, heap_end) =
+        unsafe { (ARM_BASE, ARM_END, FROM_MAILBOX, HEAP_START, HEAP_END) };
     let origem = if mailbox { "mailbox" } else { "reserva" };
     uart::write_fmt(format_args!(
         "ram: 0x{arm_base:08x} 0x{size:08x} {origem}\r\n\
@@ -145,13 +144,7 @@ fn alloc(bytes: usize) -> Option<usize> {
                 let remain = size - need;
                 if remain >= HDR + ALIGN {
                     let rest = (cur as usize + need) as *mut Free;
-                    core::ptr::write(
-                        rest,
-                        Free {
-                            size: remain,
-                            next,
-                        },
-                    );
+                    core::ptr::write(rest, Free { size: remain, next });
                     (*cur).size = need;
                     link(prev, rest);
                 } else {

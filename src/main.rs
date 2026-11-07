@@ -7,9 +7,9 @@ mod fs;
 mod load;
 mod mmu;
 mod panic;
+mod physmem;
 mod sched;
 mod sd;
-mod physmem;
 mod sync;
 mod syscall;
 mod timer;
@@ -38,6 +38,8 @@ pub extern "C" fn rust_main() -> ! {
     mmu::enable(el);
     if !video::init() {
         uart::puts("video: indisponivel\r\n");
+    } else if !video::exercise() {
+        uart::puts("video: desenho falhou\r\n");
     }
     mmu::publish_secondary();
     timer::start(el);
@@ -84,7 +86,11 @@ fn arrived_flags() -> [u8; 4] {
 }
 
 fn flag(seen: u8) -> u8 {
-    if seen == 0 { 0 } else { 1 }
+    if seen == 0 {
+        0
+    } else {
+        1
+    }
 }
 
 /// Aff0 de `MPIDR_EL1`: 0..3 nos quatro Cortex-A53.

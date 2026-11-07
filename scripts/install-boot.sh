@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Copia o firmware e o kernel para um volume exFAT já montado.
-# Não formata e não mexe na tabela de partições: o sistema fica no
-# formato que o pendrive já tem.
+# Copia o firmware e o kernel para um volume FAT32 ou exFAT já montado.
+# Não formata e não mexe na tabela de partições. O slot SD do Pi 3B+
+# só inicia a partir de FAT32.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -10,7 +10,10 @@ DEST="${1:-}"
 
 src=$(findmnt -no SOURCE -T "$DEST")
 fstype=$(findmnt -no FSTYPE -T "$DEST")
-[[ $fstype == exfat ]] || { echo "erro: $DEST está em '$fstype'; este passo espera exFAT"; exit 1; }
+case $fstype in
+    vfat|exfat) ;;
+    *) echo "erro: $DEST está em '$fstype'; este passo espera FAT32 ou exFAT"; exit 1 ;;
+esac
 case $src in
     /dev/nvme*|/dev/mmcblk0*)
         echo "erro: $src parece disco do sistema"
@@ -26,5 +29,5 @@ for f in bootcode.bin start.elf fixup.dat config.txt kernel8.img; do
     cp -v "boot/$f" "$DEST/"
 done
 sync
-echo "arquivos copiados para $DEST ($src, exFAT)"
+echo "arquivos copiados para $DEST ($src, $fstype)"
 ls -lh "$DEST"
