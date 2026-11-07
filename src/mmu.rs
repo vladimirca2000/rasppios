@@ -89,7 +89,6 @@ pub fn enable(el: u8) {
     unsafe {
         core::arch::asm!("dsb sy", "isb", options(nostack, preserves_flags));
     }
-    publish_ready();
     install(el);
 }
 
@@ -97,6 +96,11 @@ pub fn enable(el: u8) {
 /// As tabelas já foram gravadas pelo núcleo 0.
 pub fn enable_secondary(el: u8) {
     install(el);
+}
+
+/// Acorda os núcleos secundários depois de toda a MMU do núcleo 0 estar pronta.
+pub fn publish_secondary() {
+    publish_ready();
 }
 
 /// Acorda os núcleos que entraram em `_start` antes das tabelas existirem.

@@ -39,6 +39,7 @@ pub extern "C" fn rust_main() -> ! {
     if !video::init() {
         uart::puts("video: indisponivel\r\n");
     }
+    mmu::publish_secondary();
     timer::start(el);
 
     uart::write_fmt(format_args!(

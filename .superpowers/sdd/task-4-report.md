@@ -96,3 +96,22 @@ formatar, copiando os cinco arquivos de boot para `/dev/sda1` em FAT32.
 - `make check`: reproduziu o bloqueio ambiental do harness/QEMU, sem produzir
   resultado final; o processo foi encerrado e isso não foi contado como
   aceite.
+
+## Correção do achado SMP/TLB da revisão final
+
+- `mmu::enable()` agora constrói e instala a MMU no núcleo 0 sem publicar
+  `MMU_READY`.
+- `main.rs` chama `mmu::publish_secondary()` somente depois de
+  `video::init()` negociar e mapear o framebuffer. `enable_secondary()`
+  permanece inalterada, e os núcleos secundários continuam bloqueados no
+  spin table até essa publicação.
+- A API de vídeo e o comportamento de EL0 não foram alterados.
+
+### Validação desta correção
+
+- `cargo build --release`: passou; permanece o warning preexistente de
+  `BLACK` não usado.
+- `make check`: compilou e gerou `boot/kernel8.img`, mas o harness do QEMU
+  permaneceu bloqueado sem produzir o resultado final; foi interrompido.
+- `git diff --check`: passou.
+- Lint de `src/mmu.rs`, `src/main.rs` e deste relatório: nenhum erro.
