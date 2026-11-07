@@ -3,13 +3,20 @@
 
 mod console;
 mod exception;
+mod fs;
+mod load;
 mod mmu;
 mod panic;
 mod sched;
+mod sd;
 mod physmem;
 mod sync;
+mod syscall;
 mod timer;
 mod uart;
+mod usb;
+mod user;
+mod video;
 
 use core::arch::global_asm;
 
@@ -29,10 +36,11 @@ pub extern "C" fn rust_main() -> ! {
     let id = core_id();
     let arrived = arrived_flags();
     mmu::enable(el);
+    video::init();
     timer::start(el);
 
     uart::write_fmt(format_args!(
-        "rasppios: marco 10\r\n\
+        "rasppios: marco 17\r\n\
          kernel AArch64 carregado em 0x80000\r\n\
          exception level: EL{el}\r\n\
          nucleo em execucao: {id}\r\n\
@@ -49,6 +57,7 @@ pub extern "C" fn rust_main() -> ! {
     } else {
         uart::puts("ERRO nucleo inesperado\r\n");
     }
+    usb::init();
 
     console::run(el, id, arrived);
 }

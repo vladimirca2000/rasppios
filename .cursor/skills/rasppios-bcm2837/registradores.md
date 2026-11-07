@@ -35,3 +35,19 @@ O mailbox do canal de propriedades não está no PDF do BCM2835. O QEMU 8.2.2 (`
 Baud: `divisor = clock / (8 * baud) - 1`.
 
 Não inventar offset. Registrador novo entra nesta tabela com a página do PDF antes de ir para o código.
+
+## DWC2 do marco 13
+
+Não está no PDF do BCM2835. A base no Pi 3 é `0x3F980000`, o `USB_OTG_OFFSET` 0x980000 de `include/hw/arm/raspi_platform.h` do QEMU 8.2.2. Os deslocamentos internos são os de `include/hw/usb/dwc2-regs.h` dessa mesma versão: `GAHBCFG` 0x008, `GUSBCFG` 0x00C, `GRSTCTL` 0x010, `GINTSTS` 0x014, `GRXFSIZ` 0x024, `GNPTXFSIZ` 0x028, `HPTXFSIZ` 0x100, `HCFG` 0x400, `HFIR` 0x404, `HFNUM` 0x408, `HPRT0` 0x440 e o canal 0 a partir de `HCCHAR` 0x500. O modelo não move dados pela FIFO; a transferência usa `HCDMA`.
+
+## SDHOST do marco 14
+
+Base `0x3F202000`, o `MMCI0_OFFSET` 0x202000 de `include/hw/arm/raspi_platform.h` do QEMU 8.2.2. Os deslocamentos são os de `hw/sd/bcm2835_sdhost.c` dessa versão: `SDCMD` 0x00, `SDARG` 0x04, `SDCDIV` 0x0c, `SDRSP0` 0x10, `SDHSTS` 0x20, `SDVDD` 0x30, `SDEDM` 0x34, `SDHCFG` 0x38, `SDHBCT` 0x3c, `SDDATA` 0x40, `SDHBLC` 0x50. A função 4 nos GPIO 48–53 (`GPFSEL4`/`GPFSEL5`) é a que esse QEMU trata como seleção do SDHOST.
+
+## Framebuffer do marco 18
+
+A negociação usa o mailbox de propriedades já verificado acima: leitura
+`0x3F00_B880`, status `0x3F00_B898`, escrita `0x3F00_B8A0` e canal 8. O
+endereço de barramento devolvido pela tag `ALLOCATE_BUFFER` é aceito somente
+com o alias `0xC000_0000`; o código remove esse alias antes de criar o
+mapeamento ARM identidade do framebuffer.
