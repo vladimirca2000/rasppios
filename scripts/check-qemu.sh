@@ -6,6 +6,8 @@ cd "$(dirname "$0")/.."
 
 IMG="boot/kernel8.img"
 [[ -f "$IMG" ]] || { echo "erro: falta $IMG (rode make kernel)"; exit 1; }
+RUN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/rasppios-check.XXXXXX")"
+export RASPPIOS_CHECK_DIR="$RUN_DIR"
 
 boot_once() {
     local out="$1"
@@ -37,12 +39,14 @@ import os, pty, re, select, socket, subprocess, sys, time
 
 out_path = sys.argv[1]
 img = "boot/kernel8.img"
-mon_path = "/tmp/rasppios-mon.sock"
+run_dir = os.environ["RASPPIOS_CHECK_DIR"]
+mon_path = os.path.join(run_dir, "rasppios-mon.sock")
+sd_path = os.path.join(run_dir, "rasppios-sd.img")
 try:
     os.unlink(mon_path)
 except FileNotFoundError:
     pass
-with open("/tmp/rasppios-sd.img", "wb") as image:
+with open(sd_path, "wb") as image:
     image.truncate(4 * 1024 * 1024)
 master, slave = pty.openpty()
 proc = subprocess.Popen(
@@ -53,7 +57,7 @@ proc = subprocess.Popen(
         "-serial", "null",
         "-serial", "stdio",
         "-display", "none",
-        "-drive", "if=sd,format=raw,file=/tmp/rasppios-sd.img",
+        "-drive", f"if=sd,format=raw,file={sd_path}",
         "-device", "usb-kbd",
         "-monitor", f"unix:{mon_path},server,nowait",
         "-no-reboot",
@@ -271,6 +275,7 @@ persist_once() {
 import os, pty, select, subprocess, sys, time
 
 out_path = sys.argv[1]
+sd_path = os.path.join(os.environ["RASPPIOS_CHECK_DIR"], "rasppios-sd.img")
 master, slave = pty.openpty()
 proc = subprocess.Popen(
     [
@@ -280,7 +285,7 @@ proc = subprocess.Popen(
         "-serial", "null",
         "-serial", "stdio",
         "-display", "none",
-        "-drive", "if=sd,format=raw,file=/tmp/rasppios-sd.img",
+        "-drive", f"if=sd,format=raw,file={sd_path}",
         "-monitor", "none",
         "-no-reboot",
     ],
@@ -335,7 +340,11 @@ OUT1="$(mktemp)"
 OUT2="$(mktemp)"
 OUT3="$(mktemp)"
 OUT4="$(mktemp)"
-trap 'rm -f "$OUT1" "$OUT2" "$OUT3" "$OUT4"' EXIT
+cleanup() {
+    rm -f "$OUT1" "$OUT2" "$OUT3" "$OUT4"
+    rm -rf "$RUN_DIR"
+}
+trap cleanup EXIT
 
 if ! boot_once "$OUT1" || ! boot_once "$OUT2"; then
     echo "falha: boot do nucleo 0 nao repetiu no QEMU raspi3b"
