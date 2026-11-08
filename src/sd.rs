@@ -16,6 +16,7 @@ use core::ptr::{read_volatile, write_volatile};
 
 use crate::timer;
 use crate::uart;
+use crate::log;
 
 const GPIO: usize = 0x3F20_0000;
 const HOST: usize = 0x3F20_2000;
@@ -63,8 +64,29 @@ static mut GOT: [u8; BLOCK] = [0; BLOCK];
 static mut BLOCK_ADDR: bool = false;
 static mut RCA: u32 = 0;
 
+#[derive(Clone, Copy)]
+pub enum FaultMode {
+    None,
+    FailNextRead,
+    FailNextWrite,
+    FailAfter(u32),
+}
+
+static mut FAULT: FaultMode = FaultMode::None;
+
+pub fn set_fault_mode(mode: FaultMode) {
+    unsafe { FAULT = mode };
+    crate::log::warn("sd-fault-configured");
+}
+
 pub(crate) fn open() -> bool {
-    init()
+    let ready = init();
+    if ready {
+        log::info("sd-open");
+    } else {
+        log::error("sd-open-fail");
+    }
+    ready
 }
 
 pub fn exercise() {
@@ -153,6 +175,10 @@ fn init() -> bool {
 }
 
 pub(crate) fn read_block(block: u32, dest: &mut [u8; BLOCK]) -> bool {
+    if fault(true) {
+        crate::log::error("sd-read-fault");
+        return false;
+    }
     wr(SDHBCT, BLOCK as u32);
     wr(SDHBLC, 1);
     wr(SDHSTS, 0x7ff);
@@ -170,6 +196,10 @@ pub(crate) fn read_block(block: u32, dest: &mut [u8; BLOCK]) -> bool {
 }
 
 pub(crate) fn write_block(block: u32, src: &[u8; BLOCK]) -> bool {
+    if fault(false) {
+        crate::log::error("sd-write-fault");
+        return false;
+    }
     wr(SDHBCT, BLOCK as u32);
     wr(SDHBLC, 1);
     wr(SDHSTS, 0x7ff);
@@ -189,6 +219,31 @@ pub(crate) fn write_block(block: u32, src: &[u8; BLOCK]) -> bool {
         wr(SDDATA, word);
     }
     finish_fsm() && card_tran()
+}
+
+fn fault(read: bool) -> bool {
+    unsafe {
+        match FAULT {
+            FaultMode::None => false,
+            FaultMode::FailNextRead if read => {
+                FAULT = FaultMode::None;
+                true
+            }
+            FaultMode::FailNextWrite if !read => {
+                FAULT = FaultMode::None;
+                true
+            }
+            FaultMode::FailAfter(0) => {
+                FAULT = FaultMode::None;
+                true
+            }
+            FaultMode::FailAfter(left) => {
+                FAULT = FaultMode::FailAfter(left - 1);
+                false
+            }
+            _ => false,
+        }
+    }
 }
 
 /// O controlador às vezes para em espera de escrita. O bit 19 empurra a FSM

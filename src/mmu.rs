@@ -39,7 +39,12 @@ const PXN: u64 = 1 << 53;
 const XN: u64 = 1 << 54;
 
 /// Janela do EL0, no vão entre a RAM e o MMIO. Não é o buraco de `pagina`.
-pub const USER_CODE_VA: u64 = 0x3C20_0000;
+///
+/// Fica em `0x3D000000` porque a faixa logo acima da RAM (`0x3C000000..
+/// 0x3C280000`) é onde o firmware do QEMU aloca framebuffers maiores que
+/// 800x600. Manter o EL0 ali fazia `resolucao 2` em diante colidir com a
+/// própria página de código do usuário.
+pub const USER_CODE_VA: u64 = 0x3D00_0000;
 pub const USER_DATA_VA: u64 = USER_CODE_VA + PAGE;
 pub const USER_STACK_TOP: u64 = USER_CODE_VA + 3 * PAGE;
 /// Primeira página do texto do kernel. O EL0 não tem permissão sobre ela.
@@ -62,6 +67,9 @@ static mut L3: Table = Table { entries: [0; 512] };
 static mut L3_USER: Table = Table { entries: [0; 512] };
 static mut L3_FRAMEBUFFER: [Table; 504] = [Table { entries: [0; 512] }; 504];
 static mut CURRENT_EL: u8 = 0;
+/// Intervalo do framebuffer mapeado em vigor, para restaurar depois.
+static mut FB_START: u64 = 0;
+static mut FB_END: u64 = 0;
 
 unsafe extern "C" {
     static __text_start: u8;
@@ -79,8 +87,11 @@ const _: () = {
     assert!((HOLE >> 21) & 0x1ff == 496);
     assert!((MMIO_BASE >> 21) & 0x1ff == 504);
     assert!((RAM_END >> 21) & 0x1ff == 480);
-    assert!(USER_L2 == 481);
+    assert!(USER_L2 == 488);
     assert!(USER_L2 != (HOLE >> 21) as usize);
+    // A janela do EL0 não pode invadir a faixa que o firmware usa para
+    // framebuffers grandes (0x3C000000..0x3C280000) nem o buraco de teste.
+    assert!(USER_CODE_VA >= 0x3D00_0000);
 };
 
 pub fn enable(el: u8) {
@@ -305,6 +316,47 @@ pub fn map_framebuffer(start: u64, size: usize) -> bool {
         return false;
     }
 
+    // Antes de mapear o novo buffer, devolve os blocos do buffer anterior à
+    // tradução original. Sem isto, cada troca de resolução deixa páginas do
+    // framebuffer antigo mapeadas como memória normal para sempre.
+    restore_previous();
+    if !apply_mapping(map_start, map_end, true) {
+        return false;
+    }
+    unsafe {
+        write_volatile(addr_of_mut!(FB_START), map_start);
+        write_volatile(addr_of_mut!(FB_END), map_end);
+    }
+    true
+}
+
+/// Desfaz o mapeamento de framebuffer em vigor, sem mapear outro.
+///
+/// Usado quando o vídeo fica indisponível: a memória do buffer volta a ser
+/// apenas RAM comum e o kernel não mantém tradução privilegiada sobrando.
+pub fn unmap_framebuffer() {
+    restore_previous();
+}
+
+/// Restaura a tradução original do intervalo do framebuffer em vigor.
+fn restore_previous() {
+    let start = unsafe { read_volatile(addr_of!(FB_START)) };
+    let end = unsafe { read_volatile(addr_of!(FB_END)) };
+    if end > start {
+        apply_mapping(start, end, false);
+    }
+    unsafe {
+        write_volatile(addr_of_mut!(FB_START), 0);
+        write_volatile(addr_of_mut!(FB_END), 0);
+    }
+}
+
+/// Aplica, bloco a bloco, a tradução de `map_start..map_end`.
+///
+/// Com `framebuffer = true` as páginas viram memória normal gravável e não
+/// executável. Com `false` cada página volta a ser o que a tabela base
+/// dizia: bloco de 2 MiB ou entrada de `L3`.
+fn apply_mapping(map_start: u64, map_end: u64, framebuffer: bool) -> bool {
     let first_l2 = (map_start / BLOCK) as usize;
     let last_l2 = ((map_end - 1) / BLOCK) as usize;
     if last_l2 >= 504 {
@@ -347,9 +399,14 @@ pub fn map_framebuffer(start: u64, size: usize) -> bool {
             let to = map_end.min(block_end);
             let first_page = ((from - block_start) / PAGE) as usize;
             let last_page = ((to - block_start) / PAGE) as usize;
-            for page in first_page..last_page {
-                let pa = block_start + (page as u64) * PAGE;
-                write_volatile(addr_of_mut!((*l3).entries[page]), framebuffer_page_desc(pa));
+            if framebuffer {
+                for page in first_page..last_page {
+                    let pa = block_start + (page as u64) * PAGE;
+                    write_volatile(
+                        addr_of_mut!((*l3).entries[page]),
+                        framebuffer_page_desc(pa),
+                    );
+                }
             }
             write_volatile(addr_of_mut!(L2.entries[l2_index]), table_desc(l3 as u64));
         }

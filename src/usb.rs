@@ -12,6 +12,7 @@
 
 use core::ptr::{read_volatile, write_volatile};
 
+use crate::log;
 use crate::timer;
 use crate::uart;
 
@@ -47,6 +48,7 @@ const HPRT0_CONNSTS: u32 = 1 << 0;
 const HPRT0_OVRCURRCHG: u32 = 1 << 5;
 
 const HCCHAR_CHENA: u32 = 1 << 31;
+const HCCHAR_CHDIS: u32 = 1 << 30;
 const HCCHAR_ODDFRM: u32 = 1 << 29;
 const HCCHAR_LSPDDEV: u32 = 1 << 17;
 const HCCHAR_EPDIR: u32 = 1 << 15;
@@ -96,8 +98,47 @@ struct Dma {
     bytes: [u8; 256],
 }
 
+const BUS_ALIAS: u32 = 0xC000_0000;
+
+/// Em `true`, o `HCDMA` recebe o alias de barramento do BCM2837.
+static mut DMA_BUS_ALIAS: bool = true;
+
 static mut DMA: Dma = Dma { bytes: [0; 256] };
 static mut NEXT_ADDR: u8 = 1;
+static mut HPRT0_SEEN: u32 = 0;
+static mut SPEED_SEEN: u32 = 0;
+static mut LAST_INTS: u32 = 0;
+static mut LAST_CHAR: u32 = 0;
+static mut CFG_SEEN: u32 = 0;
+static mut HCFG_SEEN: u32 = 0;
+static mut FRAME_DELTA: u32 = 0;
+static mut TIMEOUTS: u32 = 0;
+
+/// Estado do registrador da porta e velocidade detectada, para a tela.
+pub fn status() -> (u32, u32) {
+    unsafe { (HPRT0_SEEN, SPEED_SEEN) }
+}
+
+/// Último `HCINT` e o `HCCHAR` do canal 0, para diagnóstico na tela.
+/// `HCCHAR` com `CHENA` ligado significa canal habilitado que nunca parou;
+/// com `CHENA` desligado significa que o núcleo não aceitou a transferência.
+pub fn diag() -> (u32, u32) {
+    unsafe { (LAST_INTS, LAST_CHAR) }
+}
+
+/// `GUSBCFG` e `HCFG` lidos depois de configurar o host: mostram o PHY
+/// escolhido e o clock com que o núcleo está operando.
+pub fn cfg() -> (u32, u32) {
+    unsafe { (CFG_SEEN, HCFG_SEEN) }
+}
+
+/// Quantos frames o host avançou numa janela curta e quantas transferências
+/// expiraram sem que o canal parasse. Zero frames significa que o clock do
+/// PHY não está chegando ao núcleo.
+pub fn timing() -> (u32, u32) {
+    unsafe { (FRAME_DELTA, TIMEOUTS) }
+}
+
 static mut KBD: Keyboard = Keyboard {
     on: false,
     route: Route {
@@ -116,11 +157,44 @@ static mut KBD: Keyboard = Keyboard {
 };
 
 pub fn init() {
-    if !host_up() {
+    let mut found = false;
+    for attempt in 0..2 {
+        if attempt > 0 {
+            log::warn("usb-retry");
+            unsafe {
+                NEXT_ADDR = 1;
+                // Segunda tentativa com endereço físico puro no `HCDMA`.
+                DMA_BUS_ALIAS = false;
+            }
+            delay_us(200_000);
+        }
+        if !host_up() {
+            continue;
+        }
+        log::info("usb-host-ready");
+        delay_us(100_000);
+        if enumerate_root() {
+            found = true;
+            break;
+        }
+    }
+    if !found {
         uart::puts("teclado: ausente\r\n");
+        log::warn("usb-host-absent");
         return;
     }
+    uart::puts("teclado: hid\r\n");
+    log::info("usb-keyboard-hid");
+}
+
+fn enumerate_root() -> bool {
     let speed = port_speed();
+    unsafe {
+        HPRT0_SEEN = rd(HPRT0);
+        SPEED_SEEN = speed;
+    }
+    check_frames();
+    uart::write_fmt(format_args!("usb: hprt 0x{:08x} speed {}\r\n", rd(HPRT0), speed));
     let route = Route {
         addr: 0,
         mps: 8,
@@ -130,9 +204,10 @@ pub fn init() {
         port: 0,
     };
     if enumerate(route, 0) {
-        uart::puts("teclado: hid\r\n");
+        true
     } else {
-        uart::puts("teclado: sem hid\r\n");
+        log::warn("usb-keyboard-no-hid");
+        false
     }
 }
 
@@ -189,25 +264,30 @@ pub fn poll() -> Option<u8> {
 fn enumerate(mut route: Route, depth: u8) -> bool {
     let mut desc = [0u8; 18];
     if !control_in(&route, req(0x80, 6, 0x100, 0, 8), &mut desc[..8]) {
+        log::warn("usb-device-desc8");
         return false;
     }
     let mps = desc[7] as u16;
     if mps == 0 || mps > 64 {
+        log::warn("usb-device-mps");
         return false;
     }
     route.mps = mps;
     if !control_in(&route, req(0x80, 6, 0x100, 0, 18), &mut desc) {
+        log::warn("usb-device-desc");
         return false;
     }
     let class = desc[4];
     let addr = alloc_addr();
     if !control_out(&route, req(0x00, 5, addr as u16, 0, 0), &[]) {
+        log::warn("usb-set-address");
         return false;
     }
     delay_us(2_000);
     route.addr = addr;
     let mut conf = [0u8; 9];
     if !control_in(&route, req(0x80, 6, 0x200, 0, 9), &mut conf) {
+        log::warn("usb-config-head");
         return false;
     }
     let total = u16::from_le_bytes([conf[2], conf[3]]) as usize;
@@ -221,23 +301,29 @@ fn enumerate(mut route: Route, depth: u8) -> bool {
             &mut full[..want],
         )
     {
+        log::warn("usb-config");
         return false;
     }
     if !control_out(&route, req(0x00, 9, value as u16, 0, 0), &[]) {
+        log::warn("usb-set-config");
         return false;
     }
     if class == 9 || interface_class(&full[..want], 9) {
         if depth > 0 {
+            log::warn("usb-hub-depth");
             return false;
         }
+        log::info("usb-hub-found");
         return scan_hub(&route, &full[..want]);
     }
+    log::warn("usb-hid-missing");
     claim_keyboard(&route, &full[..want])
 }
 
 fn scan_hub(hub: &Route, _conf: &[u8]) -> bool {
     let mut hub_desc = [0u8; 9];
     if !control_in(hub, req(0xa0, 6, 0x2900, 0, 9), &mut hub_desc) {
+        log::warn("usb-hub-desc");
         return false;
     }
     let ports = hub_desc[2].clamp(1, 8);
@@ -253,12 +339,14 @@ fn scan_hub(hub: &Route, _conf: &[u8]) -> bool {
         }
         let state = u16::from_le_bytes([status[0], status[1]]);
         if state & 1 == 0 {
+            log::warn("usb-hub-port-empty");
             continue;
         }
         if !control_out(hub, req(0x23, 3, 4, port as u16, 0), &[]) {
             continue;
         }
         if !wait_port_reset(hub, port) {
+            log::warn("usb-hub-port-reset");
             continue;
         }
         let _ = control_out(hub, req(0x23, 1, 0x14, port as u16, 0), &[]);
@@ -280,18 +368,22 @@ fn scan_hub(hub: &Route, _conf: &[u8]) -> bool {
         if enumerate(child, 1) {
             return true;
         }
+        log::warn("usb-hub-child-fail");
     }
     false
 }
 
 fn claim_keyboard(route: &Route, conf: &[u8]) -> bool {
     let Some((iface, ep, mps)) = hid_keyboard(conf) else {
+        log::warn("usb-kbd-interface");
         return false;
     };
     if !control_out(route, req(0x21, 0x0b, 0, iface as u16, 0), &[]) {
+        log::warn("usb-kbd-protocol");
         return false;
     }
     if !control_out(route, req(0x21, 0x0a, 0, iface as u16, 0), &[]) {
+        log::warn("usb-kbd-idle");
         return false;
     }
     let kbd = unsafe { &mut *core::ptr::addr_of_mut!(KBD) };
@@ -526,18 +618,27 @@ fn submit(
             split_reg |= HCSPLT_COMPSPLT;
         }
     }
+    // O canal pode ter ficado habilitado de uma tentativa anterior sem
+    // completar. Sem desabilitar primeiro, a nova escrita em HCCHAR é
+    // ignorada e a transferência nunca acontece.
+    halt_channel();
     wr(hc(0x04), split_reg);
     let tsiz = (xfer as u32 & 0x7ffff) | ((packets as u32) << 19) | (pid << 29);
     wr(hc(0x10), tsiz);
     wr(hc(0x14), dma_addr());
     wr(hc(0x08), 0x7ff);
+    wr(hc(0x0c), 0x7ff);
     let frame = rd(HFNUM) & 0xffff;
     let mut ch = (route.mps as u32 & 0x7ff)
         | ((ep as u32) << 11)
         | (kind << 18)
-        | (1 << 20)
         | ((route.addr as u32) << 22)
         | HCCHAR_CHENA;
+    // `MC` só vale para transferência de interrupção e de volume. Em
+    // controle ele deve ficar zero, como pede o databook do DWC2.
+    if kind != EP_CONTROL {
+        ch |= 1 << 20;
+    }
     if dir_in {
         ch |= HCCHAR_EPDIR;
     }
@@ -549,6 +650,10 @@ fn submit(
     }
     wr(hc(0x00), ch);
     let ints = wait_halt();
+    unsafe {
+        LAST_INTS = ints;
+        LAST_CHAR = rd(hc(0x00));
+    }
     if ints & (HCINT_STALL | HCINT_XACTERR | HCINT_AHBERR | HCINT_BBLERR | HCINT_DATATGLERR) != 0 {
         return Submit::Err;
     }
@@ -575,9 +680,54 @@ fn wait_halt() -> u32 {
             return ints;
         }
         if timer::clo().wrapping_sub(start) > 50_000 {
+            // O canal não parou. Desabilita para não deixar a próxima
+            // transferência travada no mesmo estado.
+            unsafe {
+                TIMEOUTS = TIMEOUTS.wrapping_add(1);
+            }
+            halt_channel();
             return ints;
         }
     }
+}
+
+/// Confere se o contador de frames do host avança. Se não avança, o clock
+/// do PHY não está chegando ao núcleo e nenhuma transferência completa.
+fn check_frames() {
+    let first = rd(HFNUM) & 0x3fff;
+    let start = timer::clo();
+    while timer::clo().wrapping_sub(start) < 5_000 {
+        core::hint::spin_loop();
+    }
+    let second = rd(HFNUM) & 0x3fff;
+    let delta = second.wrapping_sub(first) & 0x3fff;
+    unsafe {
+        FRAME_DELTA = delta;
+    }
+    uart::write_fmt(format_args!("usb: frames {delta}\r\n"));
+}
+
+/// Desabilita o canal 0 e espera ele realmente parar. Sem isso, uma
+/// tentativa anterior incompleta deixa `CHENA` ligado e a próxima escrita
+/// em `HCCHAR` é ignorada pelo controlador.
+fn halt_channel() {
+    let mut char = rd(hc(0x00));
+    if char & HCCHAR_CHENA == 0 {
+        wr(hc(0x08), 0x7ff);
+        return;
+    }
+    // Pelo databook do DWC2, `CHDIS` só surte efeito com `CHENA` ligado:
+    // o núcleo então para o canal e seta `CHHLTD`.
+    char |= HCCHAR_CHENA | HCCHAR_CHDIS;
+    wr(hc(0x00), char);
+    let start = timer::clo();
+    while timer::clo().wrapping_sub(start) < 20_000 {
+        let ints = rd(hc(0x08));
+        if ints & HCINT_CHHLTD != 0 {
+            break;
+        }
+    }
+    wr(hc(0x08), 0x7ff);
 }
 
 fn host_up() -> bool {
@@ -599,6 +749,10 @@ fn host_up() -> bool {
     wr(GNPTXFSIZ, (0x100 << 16) | 0x100);
     wr(HPTXFSIZ, (0x100 << 16) | 0x200);
     wr(GAHBCFG, GAHBCFG_DMA_EN | (1 << 1) | GAHBCFG_GLBL_INTR_EN);
+    unsafe {
+        CFG_SEEN = rd(GUSBCFG);
+        HCFG_SEEN = rd(HCFG);
+    }
     hprt(HPRT0_PWR, 0);
     let start = timer::clo();
     while rd(HPRT0) & HPRT0_CONNSTS == 0 {
@@ -675,8 +829,21 @@ fn hc(delta: usize) -> usize {
     0x500 + delta
 }
 
-fn dma_addr() -> u32 {
+/// Endereço físico do buffer, usado para manutenção de cache.
+fn dma_physical() -> u32 {
     core::ptr::addr_of!(DMA) as u32
+}
+
+/// Endereço escrito no `HCDMA`. No BCM2837 o motor de DMA dos periféricos
+/// enxerga a SDRAM pelo alias de barramento `0xC0000000`, o mesmo que o
+/// mailbox devolve para o framebuffer; o endereço físico puro não resolve.
+fn dma_addr() -> u32 {
+    let physical = dma_physical();
+    if unsafe { DMA_BUS_ALIAS } {
+        physical | BUS_ALIAS
+    } else {
+        physical
+    }
 }
 
 fn cache_clean(len: usize) {
@@ -688,8 +855,9 @@ fn cache_invalidate(len: usize) {
 }
 
 fn cache_op(len: usize, clean: bool) {
-    let start = dma_addr() as usize & !63;
-    let end = (dma_addr() as usize + len.max(1) + 63) & !63;
+    let base = dma_physical() as usize;
+    let start = base & !63;
+    let end = (base + len.max(1) + 63) & !63;
     let mut line = start;
     while line < end {
         unsafe {
@@ -748,6 +916,7 @@ fn ascii(modifier: u8, code: u8) -> Option<u8> {
         0x27 => Some(b'0'),
         0x28 => Some(b'\r'),
         0x2a => Some(0x7f),
+        0x2b => Some(b'\t'),
         0x2c => Some(b' '),
         _ => None,
     }

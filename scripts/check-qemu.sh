@@ -21,7 +21,7 @@ boot_once() {
         -display none \
         -no-reboot >"$out" 2>&1
     set -e
-    grep -q "rasppios: marco 17" "$out" \
+    grep -q "rasppios: marco 23" "$out" \
         && grep -q "mmu: ligada" "$out" \
         && grep -q "nucleo em execucao: 0" "$out" \
         && grep -q "chegada: 0=1" "$out" \
@@ -85,16 +85,107 @@ def read_until(token, timeout=5):
 try:
     read_until(b"rasppios>")
     read_until(b"teclado: hid")
+    mon = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    mon.settimeout(0.3)
+    mon.connect(mon_path)
+    time.sleep(0.1)
+    try:
+        mon.recv(512)
+    except socket.timeout:
+        pass
+
+    def tap(name):
+        mon.send(f"sendkey {name} 250\n".encode())
+        time.sleep(0.4)
+
+    tap("tab")
+    read_until(b"gui: foco eventos")
+    tap("tab")
+    read_until(b"gui: foco status")
+    tap("tab")
+    read_until(b"gui: foco terminal")
+    for name in ("e", "c", "h", "o", "spc", "o", "i", "ret"):
+        tap(name)
+    read_until(b"gui: echo oi")
+    read_until(b"gui: saida oi")
     os.write(master, b"help\r")
-    read_until(b"comandos: help ls cat echo run el nucleo eco ticks mem pagina trava tarefas preempcao usuario chamada bloco arquivos roda falha panico")
+    read_until(b"comandos: help ls cat echo run el nucleo eco ticks mem pagina trava tarefas preempcao usuario chamada bloco arquivos fsck stress verifica roda falha panico")
     os.write(master, b"tela\r")
-    read_until(b"tela: ok 640x480 rgb565")
+    read_until(b"tela: ok 1920x1080 rgb565")
     os.write(master, b"el\r")
     read_until(b"el: EL1")
     os.write(master, b"nucleo\r")
     read_until(b"nucleo: 0 chegada: 0=1 1=0 2=0 3=0")
     os.write(master, b"eco qemu\r")
     read_until(b"eco: qemu")
+    os.write(master, b"versao\r")
+    read_until(b"versao: rasppios marco 23")
+    read_until(b"recuperacao:")
+    os.write(master, b"gfx\r")
+    read_until(b"gfx: contrato ok")
+    # O boot tenta 1920x1080, cai para 1280x720 e por fim 640x480. No QEMU
+    # com 4 MiB de cartão o Full HD é entregue, então o modo ativo é esse.
+    os.write(master, b"resolucao\r")
+    read_until(b"resolucao: atual 1920x1080")
+    # Regressão: `resolucao N` precisa funcionar logo após o boot, sem que
+    # `modos` tenha rodado antes. Era esse o bug observado no Pi: a máscara
+    # só era preenchida por `discover()`, então a troca real falhava.
+    os.write(master, b"resolucao 9\r")
+    read_until(b"resolucao: modo nao suportado")
+    # Troca real antes de `modos`: aplica o modo 1 (800x600) e confirma.
+    os.write(master, b"resolucao 1\r")
+    read_until(b"resolucao: 800x600 aplicada")
+    os.write(master, b"ok\r")
+    read_until(b"resolucao: confirmada 800x600")
+    os.write(master, b"resolucao\r")
+    read_until(b"resolucao: atual 800x600")
+    # Volta ao modo seguro e cancela, que deve restaurar 800x600.
+    os.write(master, b"resolucao 0\r")
+    read_until(b"resolucao: 640x480 aplicada")
+    os.write(master, b"cancela\r")
+    read_until(b"resolucao: modo anterior restaurado")
+    os.write(master, b"resolucao\r")
+    read_until(b"resolucao: atual 800x600")
+    # Todos os modos da tabela precisam ser aplicáveis: antes, HD e Full HD
+    # falhavam porque a janela do EL0 colidia com a faixa de framebuffer do
+    # firmware (0x3C000000..0x3C280000).
+    for index, size in [(2, b"1024x768"), (3, b"1280x720"), (4, b"1280x1024"), (5, b"1920x1080")]:
+        os.write(master, f"resolucao {index}\r".encode())
+        read_until(b"resolucao: " + size + b" aplicada", 12)
+        os.write(master, b"ok\r")
+        read_until(b"resolucao: confirmada " + size, 8)
+    os.write(master, b"resolucao\r")
+    read_until(b"resolucao: atual 1920x1080")
+    # Volta ao modo seguro para o resto dos testes.
+    os.write(master, b"resolucao 0\r")
+    read_until(b"resolucao: 640x480 aplicada", 12)
+    os.write(master, b"ok\r")
+    read_until(b"resolucao: confirmada 640x480")
+    # Expiração sem entrada: o modo anterior volta sozinho em CONFIRM_TICKS.
+    os.write(master, b"resolucao 5\r")
+    read_until(b"resolucao: 1920x1080 aplicada", 12)
+    read_until(b"expirou; modo anterior restaurado", 15)
+    os.write(master, b"resolucao\r")
+    read_until(b"resolucao: atual 640x480")
+    # Marco 25: trocas sucessivas não podem deixar artefatos nem perder a
+    # tradução. Alterna modos várias vezes e confere que a GUI continua
+    # desenhando e que o modo final é o esperado.
+    for _ in range(3):
+        for index, size in [(5, b"1920x1080"), (0, b"640x480")]:
+            os.write(master, f"resolucao {index}\r".encode())
+            read_until(b"resolucao: " + size + b" aplicada", 12)
+            os.write(master, b"ok\r")
+            read_until(b"resolucao: confirmada " + size, 8)
+    os.write(master, b"resolucao 3\r")
+    read_until(b"resolucao: 1280x720 aplicada", 12)
+    os.write(master, b"ok\r")
+    read_until(b"resolucao: confirmada 1280x720")
+    os.write(master, b"tela\r")
+    read_until(b"tela: ok 1280x720 rgb565", 10)
+    # Só agora a descoberta, que é informativa.
+    os.write(master, b"modos\r")
+    read_until(b"modos: descoberta ok")
+    read_until(b"modo[0]")
     os.write(master, b"naoexiste\r")
     read_until(b"desconhecido: naoexiste")
 
@@ -196,22 +287,6 @@ try:
         ready, _, _ = select.select([master], [], [], 0.2)
         if ready:
             buf += os.read(master, 4096)
-    mon = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    mon.settimeout(0.3)
-    mon.connect(mon_path)
-    time.sleep(0.1)
-    try:
-        mon.recv(512)
-    except socket.timeout:
-        pass
-
-    def tap(name):
-        mon.send(f"sendkey {name} 250\n".encode())
-        time.sleep(0.4)
-
-    for name in ("e", "c", "o", "spc", "u", "s", "b", "ret"):
-        tap(name)
-    read_until(b"eco: usb")
     mon.close()
 
     os.write(master, b"bloco\r")
@@ -224,6 +299,27 @@ try:
     read_until(b"lista: ola notas")
     read_until(b"leitura: rasppios")
     read_until(b"sub: dentro")
+    os.write(master, b"fsck\r")
+    read_until(b"fsck: ok")
+    os.write(master, b"stress\r")
+    read_until(b"stress: ok 100")
+    os.write(master, b"verifica\r")
+    read_until(b"fsck: ok")
+    read_until(b"stress: ok 100")
+    os.write(master, b"falha leitura\r")
+    read_until(b"log W: sd-fault-configured")
+    os.write(master, b"bloco\r")
+    read_until(b"bloco: falhou")
+    os.write(master, b"falha escrita\r")
+    read_until(b"log W: sd-fault-configured")
+    os.write(master, b"bloco\r")
+    read_until(b"bloco: falhou")
+    os.write(master, b"falha apos 1\r")
+    read_until(b"log W: sd-fault-configured")
+    os.write(master, b"bloco\r")
+    read_until(b"leitura: 00000000")
+    read_until(b"log E: sd-read-fault")
+    read_until(b"bloco: falhou")
 
     os.write(master, b"roda\r")
     read_until(b"roda: gravou")
@@ -336,12 +432,61 @@ PY
     return "$status"
 }
 
+# O número do marco tem uma única fonte em `src/version.rs`. Este teste falha
+# se algum lugar ainda tiver o literal antigo ou se o banner divergir do
+# `versao` que o console imprime.
+version_once() {
+    local source
+    source=$(sed -n 's/^pub const MARCO: u8 = \([0-9]\+\).*/\1/p' src/version.rs)
+    [[ -n $source ]] || { echo "erro: MARCO ausente em src/version.rs"; return 1; }
+
+    # Nenhum título "rasppios marco <numero>" com número diferente do atual.
+    local stale
+    stale=$(grep -rnE 'rasppios marco [0-9]+' src/ | grep -v "rasppios marco ${source}" | grep -v "MARCO: u8" || true)
+    if [[ -n $stale ]]; then
+        echo "erro: literal de marco divergente de ${source}:"
+        echo "$stale"
+        return 1
+    fi
+
+    # A prévia anuncia o mesmo número que o código.
+    bash scripts/preview.sh --help >/dev/null 2>&1 || true
+    local preview
+    preview=$(grep -oE "rasppios marco \\\$MARCO" scripts/preview.sh | head -1 || true)
+    [[ -n $preview ]] || { echo "erro: preview.sh nao usa \$MARCO"; return 1; }
+
+    echo "versao: marco ${source} coerente em src/, preview e testes"
+    return 0
+}
+
+dist_once() {
+    local out="$1"
+    local img="${RUN_DIR}/rasppios-dist.img"
+    if ! bash scripts/dist-image.sh "$img" >"$out" 2>&1; then
+        return 1
+    fi
+    local offset=1048576
+    local part_logical=$((2048 * 512))
+    grep -q "partição inicializável" "$out" || return 1
+    grep -q "start= *2048, size=.*type=c, bootable" <(sfdisk -d "$img") || return 1
+    local first
+    first=$(dd if="$img" bs=512 skip=0 count=1 status=none | od -An -tx1 -j446 -N16 | tr -d ' \n')
+    [[ ${first:8:2} == "0c" ]] || return 1
+    [[ ${first:0:2} == "80" ]] || return 1
+    for f in bootcode.bin start.elf fixup.dat config.txt kernel8.img; do
+        MTOOLS_SKIP_CHECK=1 mdir -i "$img@@$offset" "::$f" >/dev/null 2>&1 || return 1
+    done
+    cmp -s boot/kernel8.img <(MTOOLS_SKIP_CHECK=1 mtype -i "$img@@$offset" ::kernel8.img) || return 1
+    return 0
+}
+
 OUT1="$(mktemp)"
 OUT2="$(mktemp)"
 OUT3="$(mktemp)"
 OUT4="$(mktemp)"
+OUT5="$(mktemp)"
 cleanup() {
-    rm -f "$OUT1" "$OUT2" "$OUT3" "$OUT4"
+    rm -f "$OUT1" "$OUT2" "$OUT3" "$OUT4" "$OUT5"
     rm -rf "$RUN_DIR"
 }
 trap cleanup EXIT
@@ -373,3 +518,19 @@ echo "ok: QEMU raspi3b iniciou kernel8.img duas vezes e o console respondeu"
 cat "$OUT3"
 echo "---- reinicio ----"
 cat "$OUT4"
+
+if ! version_once; then
+    echo "falha: o numero do marco nao esta coerente entre codigo, preview e testes"
+    exit 1
+fi
+
+if ! dist_once "$OUT5"; then
+    echo "falha: a imagem de distribuicao nao ficou inicializavel"
+    echo "---- distrib ----"
+    cat "$OUT5"
+    exit 1
+fi
+
+echo "---- distribuicao ----"
+cat "$OUT5"
+echo "ok: imagem de distribuicao com particao FAT32 inicializavel e os 5 arquivos"

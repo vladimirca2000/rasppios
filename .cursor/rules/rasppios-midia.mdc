@@ -1,0 +1,49 @@
+---
+description: Regras de gravação e remoção segura da mídia de boot do rasppios
+alwaysApply: true
+---
+
+# Mídia de boot
+
+## Antes de gravar
+
+1. Confirmar o destino com `findmnt -n -o SOURCE,FSTYPE,TARGET /media/vladimir/PENDRIVE`.
+2. O destino esperado é `/dev/sda1`, `vfat`, em `/media/vladimir/PENDRIVE`.
+3. Recusar `nvme*`, `mmcblk0` e qualquer dispositivo que não seja o cartão de teste.
+4. Nunca formatar a partição. `make write` só copia arquivos.
+
+```bash
+make write DEST=/media/vladimir/PENDRIVE
+```
+
+## Depois de gravar — obrigatório
+
+Sempre desmontar a unidade antes de remover o cartão, inclusive quando a
+gravação parecer ter terminado:
+
+```bash
+sync
+udisksctl unmount -b /dev/sda1
+```
+
+Se `udisksctl` não estiver disponível:
+
+```bash
+sync
+sudo umount /media/vladimir/PENDRIVE
+```
+
+Confirmar que a montagem desapareceu antes de liberar o cartão:
+
+```bash
+findmnt -n /media/vladimir/PENDRIVE || echo "desmontado"
+```
+
+## Falhas conhecidas
+
+- Escrever com o cartão montado por outro processo pode falhar com
+  `Permissão negada`; nesse caso remontar ou reexecutar com permissão
+  elevada não substitui a desmontagem no fim.
+- Remover o cartão sem `sync` pode truncar `kernel8.img` e impedir o boot.
+- Se `/media/vladimir/PENDRIVE` não existir, o cartão não está montado:
+  não inventar outro destino; pedir para reconectar.

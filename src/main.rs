@@ -4,8 +4,13 @@
 mod console;
 mod exception;
 mod fs;
+mod gfx;
+mod gui;
 mod load;
+mod limits;
+mod log;
 mod mmu;
+mod modes;
 mod panic;
 mod physmem;
 mod sched;
@@ -16,6 +21,7 @@ mod timer;
 mod uart;
 mod usb;
 mod user;
+mod version;
 mod video;
 
 use core::arch::global_asm;
@@ -29,6 +35,7 @@ unsafe extern "C" {
 #[no_mangle]
 pub extern "C" fn rust_main() -> ! {
     uart::init();
+    log::info("boot");
     exception::install();
     physmem::init();
 
@@ -36,22 +43,32 @@ pub extern "C" fn rust_main() -> ! {
     let id = core_id();
     let arrived = arrived_flags();
     mmu::enable(el);
-    if !video::init() {
+    // O USB é inicializado antes do vídeo. A negociação do framebuffer pelo
+    // mailbox mexe no firmware do VideoCore, e a ordem anterior (vídeo antes
+    // do USB) fazia o canal do DWC2 nunca executar no Pi físico.
+    usb::init();
+    if video::init() {
+        if gui::init() {
+            log::info("journal-ativo");
+            gui::render();
+        } else {
+            uart::puts("gui: indisponivel\r\n");
+        }
+    } else {
         uart::puts("video: indisponivel\r\n");
-    } else if !video::exercise() {
-        uart::puts("video: desenho falhou\r\n");
     }
     mmu::publish_secondary();
     timer::start(el);
 
     uart::write_fmt(format_args!(
-        "rasppios: marco 17\r\n\
+        "rasppios: marco {}\r\n\
          kernel AArch64 carregado em 0x80000\r\n\
          exception level: EL{el}\r\n\
          nucleo em execucao: {id}\r\n\
          chegada: 0={a0} 1={a1} 2={a2} 3={a3}\r\n\
          timer: 100 Hz\r\n\
          mmu: ligada\r\n",
+        crate::version::MARCO,
         a0 = flag(arrived[0]),
         a1 = flag(arrived[1]),
         a2 = flag(arrived[2]),
@@ -62,7 +79,7 @@ pub extern "C" fn rust_main() -> ! {
     } else {
         uart::puts("ERRO nucleo inesperado\r\n");
     }
-    usb::init();
+    fs::check();
 
     console::run(el, id, arrived);
 }

@@ -162,7 +162,8 @@ Em 2026-11-06 o Pi 3B+ mostrou `roda: gravou` e, em seguida, `roda: disco`. As d
 - `ls` lista a raiz ou um diretório. `cat` lê um arquivo, também em `notas/item`.
 - `echo` escreve o resto da linha. `eco` faz o mesmo.
 - `run prog` carrega a imagem que está no cartão e mostra o status.
-- O teclado USB escreve na mesma linha que o serial.
+- Até o Marco 18, o teclado USB escrevia na mesma linha que o serial; no
+  Marco 19, a entrada USB passa a alimentar o terminal gráfico.
 
 O `make check` compara `ls: ola notas prog`, `ls: item`, `cat: rasppios`, `cat: dentro`, `echo: shell` e `run: ok 7`.
 
@@ -185,6 +186,304 @@ qemu-system-aarch64 -M raspi3b -kernel boot/kernel8.img \
 
 Em 2026-11-07, o monitor físico do Raspberry Pi 3B+ exibiu a mesma cena automaticamente durante a carga. O Marco 18 está aceito no QEMU e no Pi.
 
+### Marco 19 — interface gráfica inicial
+
+- A GUI desenha uma barra superior e três janelas fixas: `status`,
+  `terminal` e `eventos`.
+- O foco começa no terminal e alterna com `Tab`; a borda da janela focada é
+  destacada.
+- O teclado USB envia caracteres, `Backspace` e `Enter` ao terminal gráfico,
+  enquanto a UART permanece um console independente.
+- O terminal tem histórico limitado e responde a `help`, `clear` e
+  `echo texto`; comandos desconhecidos recebem uma resposta local.
+- O teste automatizado envia `Tab` e `echo oi` pelo monitor do QEMU e mantém
+  as regressões dos marcos anteriores.
+
+Reprodução com janela gráfica:
+
+```bash
+qemu-system-aarch64 -M raspi3b -kernel boot/kernel8.img \
+  -drive if=sd,format=raw,file=/tmp/rasppios-sd.img \
+  -device usb-kbd -serial null -serial vc:100Cx30C \
+  -monitor none -display gtk,show-tabs=on,zoom-to-fit=on -no-reboot
+```
+
+O teste físico no Raspberry Pi 3B+ ainda precisa confirmar a tela, o foco e o
+terminal com teclado USB.
+
+### Marco 20 — robustez e recuperação
+
+O plano está em `docs/superpowers/plans/2026-11-07-marco-20-robustez.md`.
+A implementação atual possui logs fixos, limites do RPFS, os comandos `logs`,
+`limites`, `fsck`, `stress` e `verifica`, injeção controlada de falhas,
+checksums no RPFS v1, metadados `RPV2` redundantes e journal básico com
+recuperação no boot. O banner UART e a GUI identificam explicitamente o
+`marco 20`.
+
+No boot, o kernel executa `fsck` automaticamente. A GUI mostra
+`robustez: logs`, `fsck journal`, `carga: 100 ciclos`, `v2: superblocos` e
+`journal: ativo`; o painel de eventos exibe os logs mais recentes. O comando
+`verifica` executa `fsck` e `stress` em sequência. O comando `falha apos N`
+permite exercitar falhas determinísticas depois de N operações de SD.
+
+O USB registra no painel e na UART se o host foi ativado e se um teclado HID
+foi enumerado (`usb-host-ready`, `usb-keyboard-hid` ou o motivo da falha).
+O driver atual ainda não controla os LEDs do teclado nem implementa entrada
+de mouse; o mouse pode receber alimentação, mas não participa da GUI.
+
+O QEMU e a regressão automatizada validam boot, persistência, `fsck`, 100
+ciclos de carga, falhas de leitura/escrita e retorno ao prompt. Ainda falta
+o teste físico de interrupção do journal nos três pontos transacionais e o
+aceite final no Raspberry Pi após reiniciar com a imagem atualizada.
+
+**Pendência do teclado USB no Pi físico.** No Raspberry Pi 3B+ a enumeração
+para na primeira transferência de controle (`usb-device-desc8`) e o teclado
+não funciona, embora o QEMU enumere normalmente. A tela do Pi mostra
+`usb 21405 sp 1`, `hc 0 c c0000008`, `cfg 20002400 h 200000` e `fr 4 to 40`:
+porta habilitada, full-speed, clock de SOF ativo e canal preso em
+`CHENA|CHDIS` com `HCINT` zero. Foram testados e refutados PHY ULPI, PHY
+UTMI, espera extra, `halt_channel`, o bit `MC`, o alias de barramento no
+`HCDMA` e a ordem USB antes do vídeo. O mesmo driver funcionou no Pi no
+Marco 13, antes da GUI. O detalhe está registrado em `agent.md`.
+
+### Marco 24 — alteração de resolução segura
+
+`video::init_mode(mode)` negocia, remapeia e publica um novo modo. Se falhar,
+tenta renegociar o anterior; se nem isso funcionar, marca o vídeo como
+indisponível em vez de deixar a tela apontando para buffer inválido.
+
+O comando `resolucao` controla isso:
+
+```text
+rasppios> resolucao
+resolucao: atual 640x480 stride 1280
+rasppios> resolucao 1
+resolucao: 800x600 aplicada; digite qualquer linha para confirmar ou 'cancela' para voltar
+rasppios> ok
+resolucao: confirmada 800x600
+rasppios> resolucao
+resolucao: atual 800x600 stride 1600
+```
+
+Regras:
+
+- `resolucao` sem argumento mostra o modo ativo (dimensões e stride).
+- `resolucao N` aplica o modo de índice `N` da tabela do Marco 23.
+- A linha seguinte **confirma**, qualquer que seja o texto.
+- `cancela` restaura o modo anterior.
+- Sem resposta em `CONFIRM_TICKS` (1,5 s a 100 Hz), o modo anterior volta
+  sozinho — cobre o caso em que o monitor não sincroniza.
+
+`is_supported()` usa uma máscara calculada em tempo de compilação a partir da
+tabela, sem consultar o firmware. Antes, ela lia um cache que só
+`discover()` — chamado por `modos` — preenchia, então `resolucao N` podia
+responder `modo nao suportado` logo após o boot. O bug foi observado no Pi e
+está coberto por um ciclo red-green no `make check`.
+
+A GUI agora calcula o layout a partir das dimensões reais
+(`Layout::for_screen`), com painéis proporcionais e limites de linha por
+painel. Em 640x480 o resultado é idêntico ao anterior; em 800x600 os painéis
+crescem junto e a linha `video` do status acompanha a resolução.
+
+`make check` cobre a troca real: aplica 800x600, confirma, verifica o modo
+ativo, aplica 640x480, cancela e confirma a volta a 800x600. Também percorre
+1024x768, 1280x720 (HD), 1280x1024 e 1920x1080 (Full HD), confirmando cada um.
+
+### Marco 25 — mapa de endereços do framebuffer e modos altos
+
+HD e Full HD falhavam porque a janela do programa de usuário estava em
+`0x3C200000`, na mesma faixa em que o firmware aloca framebuffers maiores que
+800x600 (`0x3C000000..0x3C280000`). O buffer novo caía sobre a página de
+código do EL0 e o mapeamento era recusado.
+
+Solução:
+
+- Janela do EL0 movida para `0x3D000000`, no vão livre entre a RAM e o MMIO.
+- Asserções em tempo de compilação (`USER_L2 == 488` e
+  `USER_CODE_VA >= 0x3D00_0000`) impedem o retorno à faixa do framebuffer.
+- `init_mode` libera o buffer anterior com `RELEASE_FRAMEBUFFER` antes de
+  pedir outro.
+- Conflito com a janela EL0 passa a ser diagnosticado na UART em vez de
+  falhar em silêncio.
+
+Modos validados no QEMU:
+
+| Índice | Modo | Stride | Resultado |
+|---|---|---|---|
+| 0 | 640x480 | 1280 | ok |
+| 1 | 800x600 | 1600 | ok |
+| 2 | 1024x768 | 2048 | ok |
+| 3 | 1280x720 (HD) | 2560 | ok |
+| 4 | 1280x1024 | 2560 | ok |
+| 5 | 1920x1080 (Full HD) | 3840 | ok |
+
+As regressões do EL0 continuam passando: `usuario: el0`, `proprio: ok`,
+`usuario: kernel negado`, `roda` com `app: ok`.
+
+### Resolução padrão no boot
+
+O kernel tenta, nesta ordem:
+
+1. `1920x1080` (Full HD)
+2. `1280x720` (HD)
+3. `640x480` (modo seguro)
+
+Se o firmware recusar um modo, a UART mostra
+`video: 1920x1080 recusado; tentando o proximo` e o kernel segue para o
+próximo. No QEMU o boot já entrega Full HD:
+
+```text
+video: 1920x1080 rgb565 stride 3840
+```
+
+O fallback foi comprovado forçando dois modos inválidos:
+
+```text
+video: 3840x2160 recusado; tentando o proximo
+video: 2560x1440 recusado; tentando o proximo
+video: 640x480 rgb565 stride 1280
+```
+
+### Confirmação de resolução
+
+`resolucao N` aplica o modo e dá **10 segundos** para confirmar:
+
+```text
+rasppios> resolucao 3
+resolucao: 1280x720 aplicada; digite qualquer linha para confirmar ou 'cancela' para voltar (10 s)
+```
+
+- Qualquer linha confirma.
+- `cancela` restaura o modo anterior imediatamente.
+- Sem entrada, o modo anterior volta sozinho ao fim do prazo — mesmo que
+  ninguém digite nada. Isso protege quem não consegue ver a tela.
+
+O comando `tela` e a cena de teste acompanham a resolução atual; não há mais
+coordenadas fixas de 640x480 na cena.
+
+### Marco 25 — reconstrução do framebuffer após mudança
+
+Cada troca de resolução deixa o buffer anterior para trás. Antes,
+`map_framebuffer` só reescrevia os blocos que tocava, então as páginas do
+framebuffer antigo ficavam mapeadas como memória normal privilegiada para
+sempre.
+
+Agora o mapeamento é explícito e reversível:
+
+- `FB_START`/`FB_END` guardam o intervalo em vigor.
+- `restore_previous()` devolve cada bloco ao descritor original antes de
+  aplicar o novo intervalo.
+- `unmap_framebuffer()` é chamado quando o vídeo fica indisponível, para não
+  sobrar tradução órfã.
+
+O `make check` exercita sete trocas consecutivas:
+
+```text
+1920x1080 → 640x480 → 1920x1080 → 640x480 → 1920x1080 → 640x480 → 1280x720
+tela: ok 1280x720 rgb565
+```
+
+Sem artefatos, sem perder a GUI e sem acesso fora dos limites.
+
+### Marco 21 — imagem de distribuição
+
+- `make dist` gera `rasppios-dist.img`: tabela MBR com uma partição FAT32
+  LBA marcada como inicializável, começando no setor 2048, com
+  `bootcode.bin`, `start.elf`, `fixup.dat`, `config.txt` e `kernel8.img`.
+- A imagem é criada sem `root` e sem loop device: o sistema de arquivos é
+  escrito no offset da partição com `mkfs.vfat --offset` e `mtools`.
+- O script confere o próprio resultado: verifica a partição inicializável
+  (`type=c`, flag `bootable`) e a presença dos cinco arquivos antes de
+  declarar sucesso.
+- `make check` também gera a imagem em diretório temporário e compara o
+  `kernel8.img` embutido com `boot/kernel8.img` byte a byte.
+- O comando `versao` imprime a identificação da versão e o procedimento de
+  recuperação: sem RPFS o boot segue, a UART responde, e `arquivos` recria
+  os arquivos de exemplo.
+
+Gravar a imagem num cartão (substitui todo o conteúdo):
+
+```bash
+make dist
+sudo dd if=rasppios-dist.img of=/dev/sdX bs=4M conv=fsync status=progress
+sync
+```
+
+O caminho do dia a dia continua sendo `make write`, que copia os arquivos
+para um cartão FAT32 já montado sem reformatar.
+
+### Marco 22 — contrato gráfico e arquitetura
+
+O contrato está em `src/gfx.rs` como código verificável, não só como
+documento. Ele fixa o que o driver, o serviço gráfico e os clientes podem
+combinar:
+
+- **Camadas:** kernel (framebuffer, MMU, timer), serviço gráfico (compositor,
+  superfícies, foco, filas) e aplicação (pede janela, desenha no próprio
+  buffer, recebe eventos). Um cliente nunca recebe o endereço do framebuffer.
+- **Formato:** `Rgb565`, 2 bytes por pixel.
+- **Limites:** área de até 1920x1080, 8 superfícies, 8 janelas, título de até
+  32 bytes, 16 mensagens na fila.
+- **Modo:** `Mode::validate` rejeita largura/altura zero, modo grande demais,
+  stride curto e stride não alinhado ao tamanho do pixel.
+- **Geometria:** `Rect` com `intersect`, `contains` e `is_empty`.
+- **Superfície:** `Surface::validate` confere recorte, stride e se
+  `offset + length` cabe na arena do serviço.
+- **API:** `create`, `destroy`, `move`, `resize`, `raise`, `damage`, `title`,
+  `close`; eventos `key`, `pointer`, `focus`, `close`.
+
+O comando `gfx` roda o autoteste e imprime `gfx: contrato ok` ou a contagem de
+falhas; `make check` exige a linha de sucesso. O autoteste pegou dois defeitos
+reais no contrato: `create` valida largura e altura em `c,d`, e `Message`
+ocupa 20 bytes, não 24.
+
+```text
+rasppios> gfx
+gfx modo 640x480: ok
+gfx superficie fora da arena: ok
+gfx msg criar sem area: ok
+gfx: contrato ok
+```
+
+### Marco 23 — descoberta e seleção de modo de vídeo
+
+`src/modes.rs` pergunta ao firmware, pelo mailbox de propriedades, quais são
+as dimensões e o stride correntes, e mantém uma tabela conservadora de seis
+modos RGB565:
+
+| Índice | Modo | Stride | Buffer |
+|---|---|---|---|
+| 0 | 640x480 | 1280 | 614 400 |
+| 1 | 800x600 | 1600 | 960 000 |
+| 2 | 1024x768 | 2048 | 1 572 864 |
+| 3 | 1280x720 | 2560 | 1 843 200 |
+| 4 | 1280x1024 | 2560 | 2 621 440 |
+| 5 | 1920x1080 | 3840 | 4 147 200 |
+
+O índice 0 é o **modo seguro**: a menor área, usada como destino de
+recuperação. Todo modo passa pelo contrato de `gfx` antes de ser aceito, e um
+índice fora da tabela é rejeitado.
+
+O comando `modos` imprime o modo atual, quantos da tabela são aceitos e cada
+modo com `stride` e tamanho de buffer, marcando com `*` o que está ativo:
+
+```text
+rasppios> modos
+modos: atual 640x480 stride 1280
+modos: 6 aceitos de 6
+modo[0]* 640x480 stride 1280 buffer 614400
+modo[1] 800x600 stride 1600 buffer 960000
+...
+modos: descoberta ok
+```
+
+`make check` exige a linha `modos: descoberta ok`.
+
+Dois detalhes de contrato do mailbox que o teste pegou: a tag de leitura é
+`0x0004_0003` (`GET_PHYSICAL_WIDTH_HEIGHT`) — `0x0004_8003` é a de escrita — e
+o código de resposta fica na palavra 4 do buffer, não na palavra 3, que é o
+tamanho da tag.
+
 ## Compilar e testar no QEMU
 
 ```bash
@@ -194,7 +493,7 @@ make check
 Saída esperada de `make check` (sobe `boot/kernel8.img`, o mesmo arquivo do cartão):
 
 ```
-rasppios: marco 17
+rasppios: marco 21
 kernel AArch64 carregado em 0x80000
 exception level: EL1
 nucleo em execucao: 0
@@ -254,6 +553,14 @@ formato como está:
 
 ```bash
 make write DEST=/media/vladimir/PENDRIVE
+```
+
+Depois de gravar, desmonte a unidade antes de retirar o cartão:
+
+```bash
+sync
+udisksctl unmount -b /dev/sda1
+findmnt -n /media/vladimir/PENDRIVE || echo "desmontado"
 ```
 
 `make image` gera `rasppios.img`, uma imagem de teste exFAT de 64 MiB com os

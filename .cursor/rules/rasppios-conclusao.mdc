@@ -1,0 +1,89 @@
+---
+description: Fluxo obrigatório ao concluir uma tarefa no rasppios — validar, gravar no cartão, desmontar e abrir o QEMU visível
+alwaysApply: true
+---
+
+# Fluxo de conclusão de tarefa
+
+Ao terminar qualquer tarefa que altere código, imagem ou `config.txt`,
+executar nesta ordem e só declarar conclusão depois do passo 5.
+
+## 1. Validar
+
+```bash
+make check
+```
+
+`make check` precisa rodar fora do sandbox: dentro dele o `timeout` não
+consegue sinalizar o QEMU, o processo fica em 400% de CPU e não termina.
+Um teste saudável leva cerca de 20 s. Se travar, encerrar os órfãos antes de
+repetir:
+
+```bash
+for p in $(pgrep -f qemu-system-aarch64); do kill -9 "$p"; done
+```
+
+## 2. Confirmar o destino da gravação
+
+```bash
+findmnt -n -o SOURCE,FSTYPE,TARGET /media/vladimir/PENDRIVE
+```
+
+Esperado: `/dev/sda1 vfat /media/vladimir/PENDRIVE`. Recusar `nvme*`,
+`mmcblk0` e qualquer coisa que não seja o cartão de teste. Se não estiver
+montado:
+
+```bash
+udisksctl mount -b /dev/sda1
+```
+
+Não inventar outro destino.
+
+## 3. Gravar sem formatar
+
+```bash
+make write DEST=/media/vladimir/PENDRIVE
+```
+
+## 4. Desmontar e confirmar
+
+```bash
+sync
+udisksctl unmount -b /dev/sda1
+findmnt -n /media/vladimir/PENDRIVE || echo "desmontado"
+```
+
+Só liberar o cartão depois que `findmnt` não listar mais a montagem.
+
+## 5. Abrir o QEMU visível — obrigatório
+
+Depois de desmontar, abrir a prévia com janela para mostrar adiantado o que
+deve aparecer no Raspberry Pi:
+
+```bash
+make preview
+```
+
+Com uma imagem de cartão específica:
+
+```bash
+make preview PREVIEW_SD=/caminho/do/cartao.img
+```
+
+A janela tem duas abas:
+
+- `bcm2835-fb` — a tela: barra `rasppios marco N`, painel verde `status`,
+  painel azul `terminal`, painel vermelho `eventos`.
+- `serial1` — a UART: banner, logs `I:`/`W:`/`E:` e o prompt `rasppios>`.
+
+## 6. Informar ao usuário
+
+Ao responder, listar:
+
+- o que foi alterado;
+- o resultado real do `make check` (linhas de sucesso relevantes);
+- confirmação de gravação e desmontagem;
+- **o que ele deve ver no Raspberry Pi**, incluindo as linhas novas na tela e
+  na UART que comprovam a mudança, e o que indicaria falha.
+
+Não pedir foto sem dizer antes o que a foto deve conter.

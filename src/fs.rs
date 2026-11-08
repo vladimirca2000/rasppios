@@ -10,12 +10,17 @@
 
 use crate::sd;
 use crate::uart;
+use crate::{limits, log};
 
 const SB: u32 = 64;
 const ROOT: u32 = 65;
 const BITMAP: u32 = 66;
 const DATA: u32 = 67;
 const DATA_BLOCKS: u32 = 16;
+const INTEGRITY: u32 = 63;
+const V2_SUPER_A: u32 = 61;
+const V2_SUPER_B: u32 = 62;
+const JOURNAL: u32 = 60;
 const ENTRY: usize = 32;
 const SLOTS: usize = 512 / ENTRY;
 const FILE: u8 = 1;
@@ -28,7 +33,12 @@ pub enum Place {
 
 /// Garante o `RPFS`. Grava `nome` só se ele ainda não existe.
 pub fn place(name: &str, bytes: &[u8]) -> Option<Place> {
+    if !limits::valid_name(name) || !limits::valid_file_size(bytes.len()) {
+        log::warn("rpfs-limit");
+        return None;
+    }
     if !sd::open() {
+        log::error("sd-open");
         return None;
     }
     if !mounted() && !format() {
@@ -104,8 +114,293 @@ pub fn shell_cat(path: &str) {
     }
 }
 
+pub fn check() {
+    if !ready() {
+        uart::puts("fsck: sem sistema\r\n");
+        return;
+    }
+    let valid = check_dir(ROOT) && bitmap_matches();
+    if !valid {
+        uart::puts("fsck: corrompido\r\n");
+        log::error("rpfs-check-fail");
+    } else if integrity_present() && !integrity_matches() {
+        uart::puts("fsck: corrompido\r\n");
+        log::error("rpfs-checksum-fail");
+    } else if !integrity_present() {
+        if update_integrity() {
+            let recovered = publish_v2_superblocks(1);
+            if recovered {
+                uart::puts("fsck: recuperado\r\n");
+                log::info("rpfs-integrity-created");
+            } else {
+                uart::puts("fsck: corrompido\r\n");
+                log::error("rpfs-integrity-fail");
+            }
+        } else {
+            uart::puts("fsck: corrompido\r\n");
+            log::error("rpfs-integrity-fail");
+        }
+    } else if v2_superblocks_valid() < 2 {
+        if publish_v2_superblocks(1) {
+            uart::puts("fsck: recuperado\r\n");
+            log::info("rpfs-superblock-recovered");
+        } else {
+            uart::puts("fsck: corrompido\r\n");
+            log::error("rpfs-superblock-fail");
+        }
+    } else {
+        uart::puts("fsck: ok\r\n");
+        log::info("rpfs-check-ok");
+    }
+}
+
+pub fn stress() {
+    if !ready() {
+        uart::puts("stress: sem sistema\r\n");
+        return;
+    }
+    let mut data = [0u8; 512];
+    for _ in 0..100 {
+        let Some((block, size, kind)) = lookup(ROOT, "ola") else {
+            uart::puts("stress: falhou\r\n");
+            return;
+        };
+        if kind != FILE || size > data.len() || !sd::read_block(block, &mut data) {
+            uart::puts("stress: falhou\r\n");
+            return;
+        }
+        let Some((notes, _, dir_kind)) = lookup(ROOT, "notas") else {
+            uart::puts("stress: falhou\r\n");
+            return;
+        };
+        let Some((item, item_size, item_kind)) = lookup(notes, "item") else {
+            uart::puts("stress: falhou\r\n");
+            return;
+        };
+        if dir_kind != DIR
+            || item_kind != FILE
+            || item_size > data.len()
+            || !sd::read_block(item, &mut data)
+        {
+            uart::puts("stress: falhou\r\n");
+            return;
+        }
+    }
+    uart::puts("stress: ok 100\r\n");
+    log::info("rpfs-stress-ok");
+}
+
 fn ready() -> bool {
     sd::open() && mounted()
+}
+
+fn check_dir(dir: u32) -> bool {
+    if !limits::valid_block(dir) {
+        return false;
+    }
+    let mut block = [0u8; 512];
+    if !sd::read_block(dir, &mut block) {
+        return false;
+    }
+    for slot in 0..SLOTS {
+        let entry = &block[slot * ENTRY..slot * ENTRY + ENTRY];
+        if entry[16] == 0 {
+            continue;
+        }
+        let end = entry[..16].iter().position(|byte| *byte == 0).unwrap_or(16);
+        let Ok(name) = core::str::from_utf8(&entry[..end]) else {
+            return false;
+        };
+        if !limits::valid_name(name) || !limits::valid_block(u32_at(entry, 20)) {
+            return false;
+        }
+        if entry[16] == FILE && !limits::valid_file_size(u32_at(entry, 24) as usize) {
+            return false;
+        }
+        if entry[16] != FILE && entry[16] != DIR {
+            return false;
+        }
+    }
+    true
+}
+
+fn bitmap_matches() -> bool {
+    let mut bitmap = [0u8; 512];
+    if !sd::read_block(BITMAP, &mut bitmap) {
+        return false;
+    }
+    for index in DATA..=82 {
+        let byte = ((index - DATA) / 8) as usize;
+        let bit = 1u8 << ((index - DATA) % 8);
+        if bitmap[byte] & bit != 0 && !limits::valid_block(index) {
+            return false;
+        }
+    }
+    true
+}
+
+fn integrity_present() -> bool {
+    let mut block = [0u8; 512];
+    sd::read_block(INTEGRITY, &mut block) && block[..4] == *b"RPI1"
+}
+
+fn v2_superblocks_valid() -> u8 {
+    let mut a = [0u8; 512];
+    let mut b = [0u8; 512];
+    let a_ok = sd::read_block(V2_SUPER_A, &mut a) && valid_v2(&a);
+    let b_ok = sd::read_block(V2_SUPER_B, &mut b) && valid_v2(&b);
+    (a_ok as u8) + (b_ok as u8)
+}
+
+fn valid_v2(block: &[u8; 512]) -> bool {
+    block[..4] == *b"RPV2"
+        && u32_at(block, 8) == ROOT
+        && u32_at(block, 12) == BITMAP
+        && u32_at(block, 16) == DATA
+        && u32_at(block, 20) == DATA_BLOCKS
+        && u32_at(block, 24) == checksum_without_field(block)
+}
+
+fn checksum_without_field(block: &[u8; 512]) -> u32 {
+    let mut copy = *block;
+    copy[24..28].fill(0);
+    checksum(&copy)
+}
+
+fn integrity_matches() -> bool {
+    let mut meta = [0u8; 512];
+    let mut superblock = [0u8; 512];
+    let mut root = [0u8; 512];
+    let mut bitmap = [0u8; 512];
+    if !sd::read_block(INTEGRITY, &mut meta)
+        || !sd::read_block(SB, &mut superblock)
+        || !sd::read_block(ROOT, &mut root)
+        || !sd::read_block(BITMAP, &mut bitmap)
+    {
+        return false;
+    }
+    if meta[..4] != *b"RPI1"
+        || u32_at(&meta, 4) != checksum(&superblock)
+        || u32_at(&meta, 8) != checksum(&root)
+        || u32_at(&meta, 12) != checksum(&bitmap)
+    {
+        return false;
+    }
+    for index in 0..DATA_BLOCKS {
+        let byte = (index / 8) as usize;
+        let bit = 1u8 << (index % 8);
+        if bitmap[byte] & bit != 0 {
+            let mut data = [0u8; 512];
+            if !sd::read_block(DATA + index, &mut data)
+                || u32_at(&meta, 16 + index as usize * 4) != checksum(&data)
+            {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+fn update_integrity() -> bool {
+    let mut meta = [0u8; 512];
+    let mut superblock = [0u8; 512];
+    let mut root = [0u8; 512];
+    let mut bitmap = [0u8; 512];
+    if !sd::read_block(SB, &mut superblock)
+        || !sd::read_block(ROOT, &mut root)
+        || !sd::read_block(BITMAP, &mut bitmap)
+    {
+        return false;
+    }
+    meta[..4].copy_from_slice(b"RPI1");
+    meta[4..8].copy_from_slice(&checksum(&superblock).to_le_bytes());
+    meta[8..12].copy_from_slice(&checksum(&root).to_le_bytes());
+    meta[12..16].copy_from_slice(&checksum(&bitmap).to_le_bytes());
+    for index in 0..DATA_BLOCKS {
+        let byte = (index / 8) as usize;
+        let bit = 1u8 << (index % 8);
+        let value = if bitmap[byte] & bit != 0 {
+            let mut data = [0u8; 512];
+            if !sd::read_block(DATA + index, &mut data) {
+                return false;
+            }
+            checksum(&data)
+        } else {
+            0
+        };
+        let start = 16 + index as usize * 4;
+        meta[start..start + 4].copy_from_slice(&value.to_le_bytes());
+    }
+    let meta_sum = checksum(&meta);
+    if !write_journal(1, meta_sum) {
+        return false;
+    }
+    if !sd::write_block(INTEGRITY, &meta) {
+        return false;
+    }
+    if !write_journal(2, meta_sum) {
+        return false;
+    }
+    clear_journal()
+}
+
+fn checksum(block: &[u8; 512]) -> u32 {
+    let mut hash = 0x811c_9dc5u32;
+    for byte in block {
+        hash = (hash ^ u32::from(*byte)).wrapping_mul(0x0100_0193);
+    }
+    hash
+}
+
+fn write_journal(state: u32, meta_sum: u32) -> bool {
+    let mut block = [0u8; 512];
+    block[..4].copy_from_slice(b"JRN1");
+    block[4..8].copy_from_slice(&state.to_le_bytes());
+    block[8..12].copy_from_slice(&meta_sum.to_le_bytes());
+    let sum = checksum(&block);
+    block[12..16].copy_from_slice(&sum.to_le_bytes());
+    sd::write_block(JOURNAL, &block)
+}
+
+fn clear_journal() -> bool {
+    sd::write_block(JOURNAL, &[0u8; 512])
+}
+
+fn recover_journal() {
+    let mut block = [0u8; 512];
+    if !sd::read_block(JOURNAL, &mut block) || block[..4] != *b"JRN1" {
+        return;
+    }
+    let mut copy = block;
+    copy[12..16].fill(0);
+    if u32_at(&block, 12) != checksum(&copy) {
+        log::error("rpfs-journal-invalid");
+        return;
+    }
+    match u32_at(&block, 4) {
+        1 => {
+            let _ = clear_journal();
+            log::warn("rpfs-journal-discarded");
+        }
+        2 => {
+            let _ = clear_journal();
+            log::info("rpfs-journal-committed");
+        }
+        _ => log::error("rpfs-journal-state"),
+    }
+}
+
+fn publish_v2_superblocks(generation: u32) -> bool {
+    let mut block = [0u8; 512];
+    block[..4].copy_from_slice(b"RPV2");
+    block[4..8].copy_from_slice(&generation.to_le_bytes());
+    block[8..12].copy_from_slice(&ROOT.to_le_bytes());
+    block[12..16].copy_from_slice(&BITMAP.to_le_bytes());
+    block[16..20].copy_from_slice(&DATA.to_le_bytes());
+    block[20..24].copy_from_slice(&DATA_BLOCKS.to_le_bytes());
+    let sum = checksum(&block);
+    block[24..28].copy_from_slice(&sum.to_le_bytes());
+    sd::write_block(V2_SUPER_A, &block) && sd::write_block(V2_SUPER_B, &block)
 }
 
 fn parent_and_name(path: &str) -> Option<(u32, &str)> {
@@ -186,11 +481,34 @@ fn ensure_demo() -> bool {
 }
 
 fn mounted() -> bool {
+    recover_journal();
     let mut block = [0u8; 512];
     if !sd::read_block(SB, &mut block) {
+        log::warn("rpfs-read-super");
         return false;
     }
-    block[0..4] == *b"RPFS" && u32_at(&block, 4) == 1
+    let valid = block[0..4] == *b"RPFS" && u32_at(&block, 4) == 1;
+    if valid {
+        migrate_v1_metadata();
+        log::info("rpfs-mount");
+    } else {
+        log::warn("rpfs-invalid");
+    }
+    valid
+}
+
+fn migrate_v1_metadata() {
+    match v2_superblocks_valid() {
+        2 => {}
+        0 | 1 => {
+            if publish_v2_superblocks(1) {
+                log::info("rpfs-v1-migrated");
+            } else {
+                log::warn("rpfs-v1-migration-fail");
+            }
+        }
+        _ => log::error("rpfs-v2-state"),
+    }
 }
 
 fn format() -> bool {
@@ -200,18 +518,19 @@ fn format() -> bool {
     let mut block = [0u8; 512];
     block[0..4].copy_from_slice(b"RPFS");
     block[4..8].copy_from_slice(&1u32.to_le_bytes());
-    sd::write_block(SB, &block)
+    sd::write_block(SB, &block) && update_integrity() && publish_v2_superblocks(1)
 }
 
 fn create_dir(parent: u32, name: &str) -> bool {
     let Some(block) = alloc() else {
         return false;
     };
-    add(parent, name, DIR, block, 0)
+    add(parent, name, DIR, block, 0) && update_integrity()
 }
 
 fn create_file(parent: u32, name: &str, text: &[u8]) -> bool {
-    if text.len() > 512 {
+    if !limits::valid_name(name) || !limits::valid_file_size(text.len()) {
+        log::warn("rpfs-limit");
         return false;
     }
     let Some(block) = alloc() else {
@@ -222,7 +541,7 @@ fn create_file(parent: u32, name: &str, text: &[u8]) -> bool {
     if !sd::write_block(block, &data) {
         return false;
     }
-    add(parent, name, FILE, block, text.len() as u32)
+    add(parent, name, FILE, block, text.len() as u32) && update_integrity()
 }
 
 fn list(dir: u32) -> bool {
@@ -286,7 +605,12 @@ fn lookup(dir: u32, name: &str) -> Option<(u32, usize, u8)> {
 }
 
 fn add(dir: u32, name: &str, kind: u8, start: u32, size: u32) -> bool {
-    if name.len() > 15 {
+    if !limits::valid_block(dir)
+        || !limits::valid_block(start)
+        || !limits::valid_name(name)
+        || !limits::valid_file_size(size as usize)
+    {
+        log::warn("rpfs-invalid-entry");
         return false;
     }
     let mut block = [0u8; 512];

@@ -2,85 +2,6 @@
 
 Precisamos de um plano de etapas testável, incremental e fiel à filosofia do Tanenbaum. Vamos dividir em **fases que produzem algo executável a cada etapa** — primeiro em VM (QEMU), depois no Raspberry Pi 3B+.
 
-## Como conduzir cada etapa
-
-Skills do repositório, lidas antes de codar: `.cursor/skills/rasppios-etapa` (fluxo do marco) e `.cursor/skills/rasppios-bcm2837` (mapa do Pi 3B+ e do QEMU). Rust `no_std`, assembly, linker, MMIO e QEMU genérico continuam nas skills pessoais já instaladas.
-
-Sempre que o código, a imagem ou uma decisão técnica mudar:
-
-1. Atualizar este arquivo: o que mudou, em qual marco, e o que ainda falta para o aceite.
-2. Atualizar o `README.md` com o que já está feito e como reproduzir.
-3. No fim de cada marco concluído no QEMU, nesta ordem:
-   - Rodar `make check`.
-   - Abrir o QEMU com janela para visualizar a miniUART. A aba `bcm2835-fb` fica preta até o marco de vídeo; o texto está na aba `serial1`.
-
-```bash
-qemu-system-aarch64 -M raspi3b -kernel boot/kernel8.img \
-  -serial null -serial vc:100Cx30C \
-  -monitor none -display gtk,show-tabs=on,zoom-to-fit=on -no-reboot
-```
-
-   - Gravar a imagem no pendrive já montado, sem formatar:
-
-```bash
-make write DEST=/media/vladimir/PENDRIVE
-```
-
-Confirmar com `findmnt -n -o SOURCE,FSTYPE,TARGET /media/vladimir/PENDRIVE` que o destino é `/dev/sda1 vfat /media/vladimir/PENDRIVE` e que a origem não é `nvme`. A cópia aceita `vfat` e `exfat`, não formata e recusa dispositivos `nvme` e `mmcblk0`. Não usar `scripts/write-drive.sh`. Se o cartão não estiver montado, não inventar outro destino.
-
-## Estado atual
-
-**Marco 1 no QEMU: feito. No Pi: feito.** A imagem sobe e a miniUART imprime o banner. Em 2026-11-06 o cartão FAT32 iniciou o Pi 3B+ e a UART física mostrou o banner com `exception level: EL1`.
-
-**Marco 2 no QEMU: feito. No Pi: feito.** Cada núcleo que entra em `_start` recebe 32 KiB de pilha e é identificado por `MPIDR_EL1`. Só o núcleo 0 chama `rust_main`. No `raspi3b` do QEMU 8.2 os núcleos 1–3 não recebem o endereço do kernel, então a linha de chegada é `0=1 1=0 2=0 3=0`. O firmware do Pi segura os secundários fora da imagem. Em 2026-11-06 a UART física mostrou a mesma linha, `kernel somente no nucleo 0`, e o boot chegou ao prompt.
-
-**Marco 3 no QEMU: feito. No Pi: feito.** A miniUART recebe pela FIFO (`AUX_MU_LSR` bit 0, página 15 do BCM2835) e o núcleo 0 fica num console. O prompt `rasppios>` ecoa a linha e responde a `help`, `el`, `nucleo` e `eco`. `make check` sobe a imagem duas vezes e, num PTY, envia esses comandos depois do prompt; a resposta de `el` é `el: EL1`, o nível em que o kernel fica depois de descer. A formatação das mensagens passa por `core::fmt::Write`. Em 2026-11-06 a UART física aceitou `usuario` e voltou ao prompt. A espera do caractere ainda é por consulta; interrupção é o marco 5.
-
-**Marco 4 no QEMU: feito. No Pi: aberto.** `VBAR_ELx` aponta para uma tabela alinhada em 2 KiB. `SPSel` fica em 1, então a exceção síncrona deste nível entra no offset `0x200`. O comando `falha` executa `BRK #1` com `x0 = 0x41`. O relato mostra `causa: brk`, `esr: 0xf2000001` (classe 0x3C e bit IL) e os registradores `elr`, `spsr`, `far`, `sp` e `x0`, depois volta ao prompt. O comando `panico` imprime `PANIC`, o arquivo e a mensagem `provocado`, e para sem reiniciar. Falta o mesmo relato na UART física.
-
-**Marco 5 no QEMU: feito. No Pi: aberto.** O system timer usa o canal 1 (`ST_C1`, IRQ 1 do pending 1). O `CLO` no QEMU 8.2 anda a 1 MHz e o compare dispara a cada 10 000 contas, 100 Hz. `HCR_EL2.IMO` desvia a IRQ para EL2 e `DAIF.I` é liberado. O comando `ticks` imprime o contador e o `CLO`; em meio segundo o `make check` viu o contador subir 50, de `clo: 4606` para `clo: 505089`. Em 2026-11-06 a janela do QEMU foi aberta na segunda tela e `kernel8.img` foi copiado para `/media/vladimir/PENDRIVE` (`/dev/sda1`, FAT32), idêntico ao que o `make check` executou. A aba `bcm2835-fb` continua preta; o texto fica na aba `serial1`. Falta ver o contador avançar na UART física.
-
-**Marco 6 no QEMU: feito. No Pi: aberto.** O canal 8 do mailbox pergunta `GET_ARM_MEMORY`. No `raspi3b` do QEMU 8.2 a resposta é base 0 e `0x3C000000` bytes: 1 GiB menos os 64 MiB do VideoCore. O heap começa depois de `__stacks_end` e para nesse limite, antes do MMIO em `0x3F000000`. O comando `mem` aloca dois blocos de 4096, libera o primeiro e o recebe de volta no mesmo endereço. Em 2026-11-06 a janela do QEMU mostrou esse relato na aba `serial1`, e `kernel8.img` foi copiado para `/media/vladimir/PENDRIVE` (`/dev/sda1`, FAT32). Falta o mesmo mapa na UART física; se o firmware do Pi reservar outro tamanho de GPU, o mailbox é quem deve prevalecer.
-
-**Marco 7 no QEMU: feito. No Pi: aberto.** A MMU de estágio 1 faz identidade. Os primeiros 2 MiB usam páginas de 4 KiB: código executável e só leitura, constantes só leitura, dados graváveis e não executáveis. O resto da RAM até `0x3C000000` são blocos de 2 MiB. O MMIO `0x3F000000..0x40000000` é device-nGnRnE. `0x3E000000` não tem descritor. `pagina` grava e lê `0xa5a5a5a5a5a5a5a5` numa página mapeada; o acesso ao buraco gera abort de dados com `esr: 0x96000006` (classe 0x25, falha de tradução no nível 2) e `far: 0x000000003e000000`, e o console continua. O timer e a miniUART seguem depois da MMU ligada. Em 2026-11-06 a janela do QEMU mostrou esse relato na aba `serial1`. Falta o mesmo teste na UART física.
-
-**Marco 8 no QEMU: feito. No Pi: aberto.** O núcleo 0 grava `_start` no spin table (`0xe0`, `0xe8`, `0xf0`), limpa a linha de cache e manda `sev`. Os núcleos 1–3 ligam a mesma MMU e entram na trava. Cada um dos quatro soma 1000 com carga e armazenamento separados. `trava` imprimiu `nucleos 4 soma 4000`. A pilha de cada núcleo cabe nos 128 KiB reservados: o núcleo N usa `[__stacks_end - (N + 1) * 32 KiB, __stacks_end - N * 32 KiB)`. Em 2026-11-06 a janela do QEMU mostrou esse relato na aba `serial1`. Falta o mesmo teste na UART física do Pi, com os quatro núcleos de verdade.
-
-**Marco 9 no QEMU: feito. No Pi: aberto.** Duas tarefas de kernel alternam por `yield`, cada uma com pilha de 4 KiB. A troca guarda `x19`–`x28`, `x29`, `x30` e `sp`. `tarefas` rodou `a` e `b` quatro vezes cada, na ordem `abababab`, e o valor privado de cada uma sobreviveu às trocas (`preservado: ok`). Em 2026-11-06 a janela do QEMU mostrou esse relato na aba `serial1`. Falta o mesmo teste na UART física, estável por um período no Pi.
-
-**Marco 10 no QEMU: feito. No Pi: aberto.** A IRQ do timer, a 100 Hz, troca a tarefa corrente se a preempção está ligada. A escolha é a maior prioridade; empate alterna. Uma tarefa de prioridade 2 corre antes das outras, que já estavam prontas. As duas de prioridade 1 não chamam `yield` na espera: cada uma só avança quando o timer entregou o núcleo à outra. `preempcao` imprimiu `alta antes` e `fatias: abababab`. O console e a UART seguem depois. Em 2026-11-06 `kernel8.img` foi copiado para `/media/vladimir/PENDRIVE` (`/dev/sda1`, FAT32), idêntico ao que o `make check` executou, e a janela do QEMU foi aberta. A aba `bcm2835-fb` continua preta; o texto fica na aba `serial1`. Falta o mesmo teste na UART física, com carga concorrente, sem travar UART nem timer.
-
-**Marco 11 no QEMU: feito. No Pi: feito.** O firmware entrega EL2 e `make run` entrega EL3; `boot.s` desce a EL1 antes do banner, com `HCR_EL2.RW` e a IRQ física ficando em EL1. `CPACR_EL1.FPEN` libera SIMD só no EL1: o compilador zera o buffer da linha com `movi`, e o EL0 continua sem esses registradores. A MMU segue identidade para o kernel, com `AP[2:1]` privilegiado. O programa de EL0 mora numa janela à parte, `0x3C200000`, com código, dados e pilha em páginas de 4 KiB que apontam para molduras do kernel. `usuario` lê a própria página (`proprio: ok`) e a carga de `0x80000` gera abort de dados do nível inferior, `esr: 0x9200000f` (classe 0x24, falha de permissão no nível 3) e `far: 0x0000000000080000`. O vetor devolve o núcleo ao comando. No ELF os quatro núcleos entram juntos; os secundários esperam `MMU_READY` antes de ligar a MMU, e o banner segue inteiro com `chegada: 0=1 1=1 2=1 3=1`. Em 2026-11-06 a UART física do Pi 3B+ mostrou o mesmo relato, com `elr: 0x000000003c20001c`, `spsr: 0x00000000000003c0` e o prompt de volta. A tentativa inválida ficou contida.
-
-**Marco 12 no QEMU: feito. No Pi: feito.** O EL0 pede serviço com `SVC` e o número em `x8`. A chamada 0 escreve na miniUART só se o intervalo cabe na janela `0x3C200000..0x3C203000`; um ponteiro em `0x80000` volta com `x0 = !0` e não é lido. A chamada 1 lê a miniUART para uma página gravável dessa janela. A chamada 2 devolve o `CLO`. A chamada 3 encerra e o vetor volta ao comando. O hardware já deixa o `ELR` na instrução seguinte ao `SVC`. No QEMU, `chamada` imprimiu `saida: ok`, `ponteiro: negado`, um `tempo` maior que o `CLO` visto em `ticks`, `entrada: Z` e `fim: 0`. Em 2026-11-06 a UART física do Pi 3B+ mostrou `saida: ok`, `ponteiro: negado`, `tempo: 131104175` e `fim: 0`, e o prompt voltou. O byte lido não tem glifo: a linha ficou `entrada:` vazia, compatível com o CR do Enter. As quatro chamadas responderam e o console continuou.
-
-**Marco 13 no QEMU: feito. No Pi: feito.** O DWC2 em `0x3F980000` sobe em modo host e transfere por DMA. A configuração cabe um hub de um nível e um teclado HID de protocolo de boot. No `raspi3b` o QEMU põe um hub full-speed na porta e o `usb-kbd` atrás dele; o teste manda `eco usb` por `sendkey` e a miniUART ecoa a linha. Se a porta raiz for high-speed e o teclado não, a transação usa split. Sem teclado a linha é `teclado: ausente` e o console serial segue. Em 2026-11-06 a UART física do Pi 3B+ mostrou `teclado: hid`, a linha digitada `eco usb` e a resposta `eco: usb`, com o prompt de volta.
-
-**Marco 14 no QEMU: feito. No Pi: feito.** O microSD do Pi 3B+ fica no SDHOST (`0x3F202000`). No QEMU o cartão nasce no Arasan; a função ALT0 nos GPIO 48–53, a mesma que o firmware já usa no Pi, entrega o cartão ao SDHOST. `bloco` lê o bloco 0, grava `0xA5` no bloco 1, lê de volta e restaura os bytes originais. Na imagem zerada de 4 MiB o teste viu `leitura: 00000000`, `escrita: ok` e `restauro: ok`. Em 2026-11-06 a UART física do Pi 3B+ mostrou as mesmas três linhas, com o teclado ainda em `teclado: hid` e o prompt de volta. O bloco 1 foi restaurado.
-
-**Marco 15 no QEMU: feito. No Pi: aberto.** O sistema de arquivos `RPFS` ocupa os blocos 64 em diante: superbloco, raiz, mapa de blocos e dados. Cada arquivo cabe em 512 bytes. `arquivos` formata essa região se a marca não existe, cria o arquivo `ola` e o diretório `notas` com o arquivo `item`, lista e lê. Um segundo boot da mesma imagem imprime `montagem: pronta` e `persistiu: ok`. Os blocos 0 e 1 ficam fora dessa região. Em 2026-11-06 `kernel8.img` foi copiado para `/media/vladimir/PENDRIVE` (`/dev/sda1`, FAT32), idêntico ao que o `make check` executou, e a janela do QEMU foi aberta. A aba `bcm2835-fb` continua preta; o texto fica na aba `serial1`. Em 2026-11-06 a UART física mostrou a primeira execução: `montagem: nova`, `lista: ola notas`, `leitura: rasppios` e `sub: dentro`. Falta reiniciar o Pi e mandar `arquivos` de novo: a segunda vez tem de mostrar `montagem: pronta` e `persistiu: ok`, lendo `rasppios` e `dentro` sem reformatar.
-
-**Marco 16 no QEMU: feito. No Pi: feito.** O arquivo `prog` no `RPFS` é uma imagem `RPEX`: marca, versão 1, entrada no início do código e o tamanho. O carregador lê esse arquivo do cartão, copia o código para `0x3C200000` e entra em EL0. A aplicação escreve `app: ok` pela chamada 0 e termina com a chamada 3, status 7. A primeira execução grava o arquivo (`roda: gravou`). A seguinte, no QEMU depois de reiniciar e no Pi na mesma sessão, só lê o que já está no disco (`roda: disco`) e devolve o mesmo status. Em 2026-11-06 a UART física mostrou as duas linhas: `roda: gravou` e `roda: disco`, ambas com `app: ok` e `saida: 7`.
-
-**Marco 17 no QEMU: feito. No Pi: aberto.** O console responde a `ls`, `cat`, `echo` e `run`, além dos diagnósticos que já existiam. `eco` continua valendo o mesmo que `echo`. `ls` lista a raiz ou um diretório, `cat` lê um arquivo, inclusive `notas/item`, e `run prog` carrega a imagem `RPEX` que já está no cartão. A sequência automatizada viu `ls: ola notas prog`, `ls: item`, `cat: rasppios`, `cat: dentro`, `echo: shell` e `run: ok 7`. O teclado USB entra na mesma linha do serial. A escrita agora espera a FSM do SDHOST e o CMD13 até o cartão voltar ao estado `tran`, e a FIFO fica no limiar 4 do defeito de silício. Se `roda` formatar o cartão antes, `arquivos` completa `ola` e `notas` sem apagar o `prog`. O nome curto `arquivo` chama o mesmo comando. O cartão foi reformatado em FAT32 e recebeu novamente os arquivos de boot; isso apagou o RPFS. Falta agora, no Pi, executar `arquivos`, `ls`, `ls notas`, `cat ola`, `cat notas/item`, `echo shell` e `run prog`, e enviar a UART para fechar o marco.
-
-**Marco 18 no QEMU: feito. No Pi: feito.** O framebuffer negociado no QEMU `raspi3b` e no Raspberry Pi 3B+ é `640x480`, RGB565, com `stride 1280`. A cena fixa tem fundo azul-escuro, faixa azul, três retângulos e os textos `rasppios marco 18`, `framebuffer: 640x480 rgb565` e `UART continua ativa`; ela é desenhada automaticamente durante a carga, antes do prompt. O comando `tela` redesenha a mesma cena. Em 2026-11-07, o monitor físico exibiu a mesma cena esperada após o kernel atual ser gravado no cartão FAT32. A UART continua na aba `serial1`. A reprodução visual usa:
-
-```bash
-qemu-system-aarch64 -M raspi3b -kernel boot/kernel8.img \
-  -drive if=sd,format=raw,file=/tmp/rasppios-sd.img \
-  -device usb-kbd -serial null -serial vc:100Cx30C \
-  -monitor none -display gtk,show-tabs=on,zoom-to-fit=on -no-reboot
-```
-
-Na aba `serial1`, `tela` responde `tela: ok 640x480 rgb565`; na aba `bcm2835-fb`, a cena foi confirmada. O mesmo desenho foi confirmado no monitor físico do Pi 3B+.
-
-Mídia de teste: `/dev/sda` de 29,7 GB, um cartão SD num adaptador USB, partição `/dev/sda1` montada em `/media/vladimir/PENDRIVE`. Antes dos testes, uma única conversão exFAT→FAT32 foi feita nessa partição; desde então, o cartão permanece em FAT32, tipo `W95 FAT32 (LBA)`, rótulo `PENDRIVE`. O `make write` copia os cinco arquivos de boot sem formatar e, no procedimento atual, o destino esperado é `/dev/sda1` em FAT32.
-
-A documentação do boot trata a partição de carregamento como FAT/FAT32 ([hardware do Raspberry Pi](https://www.raspberrypi.com/documentation/computers/raspberry-pi.html), [Compute Module, primeira partição FAT](https://www.raspberrypi.com/documentation/computers/compute-module.html)). O fórum oficial registra que exFAT não inicia o Pi ([tópico 186215](https://forums.raspberrypi.com/viewtopic.php?t=186215)).
-
-Referências usadas no bring-up: [config.txt](https://www.raspberrypi.com/documentation/computers/config_txt.html), [processadores, BCM2837B0](https://www.raspberrypi.com/documentation/computers/processors.html), [placas clássicas, Pi 3B+](https://www.raspberrypi.com/documentation/computers/sbcs.html), [BCM2835 ARM Peripherals](https://www.raspberrypi.org/app/uploads/2012/02/BCM2835-ARM-Peripherals.pdf). O `kernel8.img` é carregado em `0x80000` ([firmware #1816](https://github.com/raspberrypi/firmware/issues/1816)).
-
 ## O que conta como sistema operacional?
 
 Não há uma fronteira universal e precisa: a definição depende do escopo. Em termos práticos, um **kernel que inicia e imprime uma mensagem é um núcleo experimental**, mas ainda não é um sistema utilizável. Um SO começa a cumprir seu papel quando gerencia recursos e oferece serviços aos programas; para este projeto, isso significa, no mínimo, processos, memória protegida, chamadas de sistema, entrada/saída e armazenamento. A definição funcional de SO da OpenStax enfatiza justamente gestão de recursos, isolamento, acesso controlado ao hardware e serviços para aplicações. ([OpenStax — What Is an Operating System?](https://openstax.org/books/introduction-computer-science/pages/6-1-what-is-an-operating-system))
@@ -134,3 +55,242 @@ Há uma ressalva sobre “VM”: o QEMU oferece `raspi3b`, não um modelo separa
 **Correção importante do plano anterior:** não devemos assumir um GIC genérico; o projeto deve seguir o controlador de interrupções e os periféricos reais do BCM2837/B+ e confirmar as diferenças no hardware. Também é mais seguro usar o firmware de boot existente do Raspberry Pi para carregar nosso kernel próprio, em vez de tentar escrever todo o bootloader como primeira etapa. O sistema continuará sendo novo e sem Linux; o firmware da placa é apenas a etapa inicial de carregamento.
 
 Minha recomendação é declarar concluído cada marco só quando passar por três checagens: **teste automatizado, boot no QEMU e boot no Pi real**, mantendo a última versão funcional do cartão como recuperação.
+
+---
+
+# Complemento: ambiente gráfico de janelas e programas iniciais
+
+Os marcos **1–21 são o plano-base** e, conforme informado, já foram concluídos. Este complemento parte desse ponto para transformar a saída gráfica e as janelas experimentais do marco 19 em um **ambiente gráfico de janelas utilizável**, com controle de resolução, múltiplos programas, shell em janela, painel de controle, explorador de arquivos, barra de tarefas e editor de texto.
+
+Neste documento, “X” significa o ambiente gráfico de janelas do projeto. **Não implica implementar o protocolo X11 nem compatibilidade com Linux/X.Org.** A meta é um sistema gráfico próprio, pequeno e adequado ao Raspberry Pi 3B+, com API documentada para aplicações nativas.
+
+## Regras de teste para todos os novos marcos
+
+Cada marco deve incluir testes automatizados dos componentes, um roteiro reproduzível no QEMU e uma validação em Raspberry Pi real. O QEMU pode não emular fielmente o firmware de vídeo, a negociação de resolução, o USB ou cada monitor; nesses casos, ele valida a lógica e o rendering em framebuffer, enquanto o teste físico valida o comportamento do monitor e dos periféricos.
+
+Para cada versão, guardar: identificação do commit/versão, configuração de tela usada, resultado dos testes, logs seriais e uma imagem/cartão anterior que ainda inicializa. Alterações de resolução e gravações em disco devem falhar de forma segura e não corromper o sistema.
+
+## Novos marcos de desenvolvimento
+
+| Marco | Entrega verificável | Aceite no QEMU | Aceite no Raspberry Pi 3B+ |
+|---|---|---|---|
+| **22. Contrato gráfico e arquitetura** | Especificação dos componentes: driver de vídeo, servidor/compositor, entrada, API de janelas e clientes; separação entre kernel, serviços e aplicações | Testes verificam dimensões, formatos de pixel, coordenadas, ownership dos buffers e mensagens da API | Boot gráfico continua funcionando e os mesmos contratos básicos são exercitados no hardware |
+| **23. Descoberta e seleção de modo de vídeo** | Consulta dos modos disponíveis, resolução atual, profundidade/formato de pixel e limites de memória; lista segura de modos suportados | Testes com modos simulados incluem válidos, inválidos e falhas do serviço gráfico | Detecta os modos realmente oferecidos pelo firmware/monitor e registra resolução atual pela UART |
+| **24. Alteração de resolução segura** | Serviço para solicitar e aplicar uma resolução suportada; validação de dimensões/stride/tamanho do buffer, liberação do buffer anterior e mecanismo de retorno ao modo anterior. Inclui o mapa de endereços: a janela do EL0 não pode ocupar a faixa onde o firmware aloca framebuffers grandes | Testes cobrem sucesso, rejeição de modo inválido, falha de alocação e conflito com a janela EL0; todos os modos da tabela aplicam | Muda entre pelo menos dois modos aceitos pelo conjunto monitor/firmware, inclusive HD e Full HD, e recupera para o modo anterior se necessário |
+| **25. Reconstrução do framebuffer após mudança** | Atualização coordenada de buffers, escala/área de trabalho, cursor e superfícies quando a resolução muda | Testes redimensionam repetidamente e detectam acesso fora dos limites, vazamentos e artefatos | Trocas sucessivas de resolução mantêm a imagem íntegra e não deixam o sistema sem saída |
+| **26. Eventos de entrada unificados** | Eventos de teclado e mouse: teclas, modificadores, movimento, botões e roda; fila e entrega a uma aplicação focada | Injeção de eventos testa ordenação, perda, foco e limites das filas | Teclado e mouse USB funcionam na GUI; eventos aparecem no shell gráfico e nos controles |
+| **27. Protocolo de janelas e superfícies** | API documentada para criar/destruir janela, definir título, solicitar tamanho, desenhar e receber eventos | Programa de teste cria uma janela, desenha e fecha sem acessar diretamente o framebuffer global | O mesmo cliente de teste abre e fecha janelas no Pi; falhas do cliente não derrubam o compositor |
+| **28. Compositor e desenho de janelas** | Composição de superfícies, fundo, bordas, título, recorte, z-order, foco e atualização parcial da tela | Testes de pixels e captura de framebuffer verificam sobreposição, recorte, foco e redraw | Verificação visual em monitor confirma a composição; janelas sobrepostas são redesenhadas corretamente |
+| **29. Movimentação, redimensionamento e foco** | Arrastar janelas, mudar tamanho quando permitido, ativar foco e trazer janela à frente; atalhos básicos | Testes de eventos reproduzidos verificam coordenadas, foco e limites do desktop | Usuário move, redimensiona e alterna foco com mouse/teclado em aplicações reais |
+| **30. API e ciclo de vida de aplicações gráficas** | Bibliotecas/serviços comuns para iniciar, suspender, fechar e reportar erro de aplicações; relação entre processo e janela | Aplicações de teste abrem simultaneamente, uma termina e as demais continuam | Shell, editor e outras aplicações executam em conjunto; fechar uma aplicação não encerra as outras |
+| **31. Console gráfico e shell em janela** | Shell funcional dentro de janela, com entrada, histórico, edição de linha, saída rolável, redimensionamento e execução de programas | Roteiro automatizado executa comandos, redireciona/mostra saída conforme suportado e valida histórico | Shell aceita comandos por teclado USB, executa programas instalados e continua responsivo com outras janelas abertas |
+| **32. Gerenciador de aplicações e multitarefa interativa** | Inicialização de diversos programas de usuário, alternância por foco/atalho e tratamento de aplicação bloqueada ou encerrada | Teste abre vários clientes e verifica que cada um recebe apenas seus eventos e conserva estado | Shell, editor e utilitários permanecem ativos ao alternar entre janelas sem congelar o desktop |
+| **33. Barra de tarefas** | Barra persistente com botão/menu de aplicações, indicadores de janelas abertas, janela ativa e relógio/estado básico | Testes verificam lista, ativação, minimização/restauração e atualização de horário | Barra permanece visível e seus botões alternam/restauram janelas no monitor do Pi |
+| **34. Minimizar, restaurar e fechar janelas** | Estados de janela, botões/atalhos e comportamento definido ao encerrar a aplicação; atualização da barra de tarefas | Transições repetidas não perdem referências nem deixam superfícies obsoletas | Minimizar/restaurar/fechar shell e editor funciona sem falhas e sem bloquear o desktop |
+| **35. Serviço de arquivos para aplicações** | API de arquivos com caminhos, diretórios, erros, permissões simples e operações necessárias aos programas | Testes criam, leem, alteram e removem arquivos em disco virtual; erros são exibidos corretamente | Operações equivalentes persistem no SD real; desligamento/reinício não perde gravações confirmadas |
+| **36. Explorador de arquivos — navegação** | Aplicação para listar pastas/arquivos, navegar por diretórios, atualizar lista e exibir caminho/local atual | Testes com árvore de arquivos simulada cobrem diretório vazio, nomes, erros e navegação | Explora o cartão SD e mostra arquivos reais, inclusive com nomes e tamanhos variados |
+| **37. Explorador de arquivos — operações básicas** | Abrir arquivo em aplicação associada, criar pasta, renomear, copiar, mover e excluir com confirmação | Testes cobrem sucesso, destino existente, falta de espaço e cancelamento; exclusão exige confirmação | Operações verificadas no SD real; não apaga silenciosamente e mantém o sistema inicializável |
+| **38. Editor de texto — edição básica** | Aplicação com área de edição, cursor, seleção simples, inserir/apagar texto, quebra de linha e rolagem | Testes editam texto longo, linhas vazias e limites de buffer; layout permanece correto | Edição por teclado USB funciona na janela e permanece responsiva com outras janelas abertas |
+| **39. Editor — abrir, salvar e estado alterado** | Abrir/salvar arquivos de texto, novo documento, salvar como, indicação de alterações não salvas e confirmação ao fechar | Testes de ida-e-volta preservam conteúdo UTF-8 definido no escopo; falhas de escrita não descartam o buffer | Arquivos salvos podem ser reabertos após reinício; fechamento de documento alterado pede confirmação |
+| **40. Painel de controle — tela** | Tela de configurações para resolução e modo de vídeo, aplicar/cancelar e voltar ao modo seguro com confirmação | Testes simulam modos suportados, rejeição e timeout; opção inválida não fica persistida | Usuário muda resolução via painel, confirma a imagem ou deixa expirar a confirmação para voltar ao modo anterior |
+| **41. Painel de controle — preferências básicas** | Configurar data/hora quando suportado, tema/cores, escala ou tamanho de fonte e comportamento simples do desktop; salvar preferências | Testes validam persistência, valores inválidos e configuração padrão restaurável | Preferências continuam após reinício e podem ser restauradas sem impedir o boot gráfico |
+| **42. Menu de aplicações e fluxo de trabalho** | Menu na barra para iniciar shell, explorador, editor e painel; atalhos e associação de texto ao editor | Cada item inicia o programa correto e reporta indisponibilidade de forma compreensível | Os quatro programas iniciam pelo menu e continuam independentes em janelas distintas |
+| **43. Mensagens, diálogos e notificações** | Diálogos comuns para erro, confirmação, salvar alterações e falta de espaço; foco e captura de interação previsíveis | Testes verificam botões, tecla Escape/Enter e que o diálogo não bloqueia processos alheios | Mensagens são legíveis no monitor e teclado/mouse respondem corretamente; erros não encerram o desktop |
+| **44. Inicialização do ambiente gráfico** | Gerenciador de sessão simples que inicia compositor, barra e serviços; modo de recuperação para iniciar apenas shell serial | Boot automatizado chega ao desktop; falha de um componente retorna a um ambiente de diagnóstico | Cartão inicializa diretamente no desktop, e uma falha gráfica ainda deixa acesso ao shell serial/recuperação |
+| **45. Estabilidade integrada e experiência final** | Teste conjunto prolongado, consumo de memória, carga de redraw, troca de resolução, operações de arquivos e encerramentos anormais; correções de usabilidade | Testes de regressão passam após reinicializações e sob carga; artefatos visuais e falhas ficam registrados | Sessão prolongada no Pi com shell, explorador, editor e painel abertos; sem corrupção, congelamento ou perda de recuperação |
+| **46. Lançamento do ambiente gráfico** | Versão identificada, imagem de SD reproduzível, instruções, lista de limitações conhecidas e procedimento de recuperação/atualização | Imagem limpa inicia o ambiente e passa os testes de aceitação documentados | Cartão preparado do zero inicia no Pi 3B+, permite mudar resolução, abrir várias janelas e usar os quatro programas principais |
+
+## Definição de concluído para as funcionalidades solicitadas
+
+- **Controle de resolução:** exibir os modos realmente suportados pelo monitor/firmware, aplicar o modo escolhido com segurança e recuperar automaticamente se a imagem não for confirmada.
+- **Várias janelas e programas:** manter processos independentes, janelas sobrepostas, foco, movimentação, minimização/restauração e fechamento sem que uma aplicação trave as demais.
+- **Shell em janela:** aceitar comandos e executar aplicações do próprio sistema, sem remover o shell serial de diagnóstico.
+- **Programas iniciais:** painel de controle, explorador de arquivos, barra de tarefas e editor de texto disponíveis pelo menu e utilizáveis simultaneamente.
+- **Sistema novo:** o kernel, os serviços, o compositor e os aplicativos são do projeto; o firmware de boot da placa pode permanecer como carregador inicial, sem transformar o projeto em uma distribuição Linux.
+
+## Critérios para declarar o complemento finalizado
+
+O complemento estará concluído somente quando o marco 46 passar no QEMU e no Raspberry Pi real, e os seguintes cenários forem demonstrados no próprio Pi:
+
+1. Iniciar no desktop e abrir shell, explorador, editor e painel de controle sem encerrar os demais.
+2. Mover, redimensionar, focar, minimizar, restaurar e fechar janelas; alternar programas pela barra de tarefas.
+3. Criar, abrir, editar, salvar, renomear e excluir um arquivo de texto, com confirmação para operações destrutivas ou alterações não salvas.
+4. Alterar a resolução para um modo suportado, confirmar que a tela está visível e verificar retorno seguro se a alteração não for confirmada.
+5. Reiniciar o sistema e confirmar persistência dos arquivos e das preferências básicas, mantendo um caminho de recuperação pela serial.
+
+A entrega é considerada um **ambiente gráfico viável para o escopo do projeto**, não um substituto geral de desktops comerciais. A compatibilidade é inicialmente limitada ao hardware e aos modos efetivamente testados no Raspberry Pi 3B+; novos dispositivos e recursos podem ser acrescentados em marcos posteriores.
+
+## Notas de projeto para manter o escopo realizável
+
+- Implementar primeiro um desktop de resolução fixa e uma janela de teste; acrescentar mudança de modo somente depois que composição, redimensionamento de buffers e tratamento de falhas estiverem sólidos.
+- Preferir um único compositor/servidor gráfico com API pequena e explícita. Clientes não devem escrever diretamente no framebuffer compartilhado nem acessar a memória de outras aplicações.
+- Executar aplicativos em espaço de usuário sempre que o modelo do kernel permitir. Uma falha de cliente deve fechar ou reiniciar aquele cliente, não reinicializar o sistema inteiro.
+- Manter o console serial como canal de diagnóstico e recuperação, mesmo depois que o desktop iniciar automaticamente.
+- Usar fontes bitmap e controles simples no primeiro lançamento; suporte amplo a fontes, aceleração gráfica, rede, áudio, USB avançado e compatibilidade com protocolos gráficos externos ficam fora do escopo inicial.
+- Não prometer uma lista universal de resoluções: a escolha disponível depende do monitor, do firmware/configuração de boot e do modo de vídeo implementado. Mostrar apenas modos que foram consultados e validados.
+
+## Estado atual
+
+- **Marcos 1–21 (plano-base): concluídos.** Marco 21 aceito no Pi em
+  2026-11-07: a tela mostrou `rasppios marco 21` com os painéis completos.
+  Aceite físico pendente apenas para o teclado USB (ver pendência abaixo).
+  O kernel sobe em AArch64 `no_std`, passa por EL2/EL3 para EL1, usa miniUART,
+  exceções, timer de 100 Hz, MMU com identidade, alocador físico, trava entre
+  quatro núcleos, escalonador cooperativo e preemptivo, EL0 com chamadas de
+  sistema, teclado USB HID, SDHOST, RPFS com v1/v2, journal e `fsck`,
+  carregador `RPEX`, shell, framebuffer 640x480 RGB565, GUI com três painéis
+  e a imagem de distribuição. `make check` valida boot duplo, console,
+  persistência, `fsck: ok`, `stress: ok 100`, falhas controladas, `versao`,
+  `gfx`, `modos` e a imagem de distribuição. Detalhes por marco estão no
+  `README.md`.
+
+**Pendência aberta — teclado USB no Pi físico (2026-11-07).**
+**Resolvido em 2026-11-07:** a UART do Pi passou a mostrar `usb-host-ready`,
+`usb-hub-found`, `teclado: hid` e `usb-keyboard-hid`, com o teclado
+funcionando na GUI. O histórico abaixo fica como registro do diagnóstico.
+
+Histórico do diagnóstico (anterior à correção):
+
+| Linha | Valor | Leitura |
+|---|---|---|
+| `usb` | `21405 sp 1` | conectado, `PRTENA`, `PRTPWR`, full-speed |
+| `hc` | `0 c c0000008` | `HCINT` zero; canal com `CHENA` e `CHDIS` presos |
+| `cfg` | `20002400 h 200000` | `FORCEHOSTMODE`, `TRDTIM=9`, PHY UTMI+ |
+| `fr` | `4 to 40` | ~1 kHz de SOF; clock do PHY ativo; 40 timeouts |
+
+Hipóteses já refutadas no hardware: PHY ULPI, PHY UTMI, espera extra após o
+reset, `halt_channel` com `CHDIS`, bit `MC` em controle, alias de barramento
+`0xC0000000` no `HCDMA` e inversão da ordem USB antes do vídeo. Nenhuma mudou
+`HCINT = 0`. O mesmo driver funcionou no Pi no marco 13, antes da GUI existir.
+
+**Marco 22 (contrato gráfico): QEMU feito; aceite físico pendente.** O
+contrato vive em `src/gfx.rs` como código verificável: `PixelFormat::Rgb565`
+com 2 bytes por pixel, limites (`1920x1080`, 8 superfícies, 8 janelas, título
+de 32 bytes), validação de `Mode` (largura, altura, stride mínimo e alinhado,
+`buffer_len`), `Rect` com interseção e teste de ponto, `Surface::validate`
+contra o tamanho da arena e as mensagens da API (`create`, `destroy`, `move`,
+`resize`, `raise`, `damage`, `title`, `close`) mais os eventos (`key`,
+`pointer`, `focus`, `close`). Um cliente nunca recebe o endereço do
+framebuffer: recebe `Surface` com deslocamento na arena do serviço.
+O comando `gfx` roda o autoteste sem tocar no framebuffer e imprime
+`gfx: contrato ok`; `make check` exige essa linha. O próprio autoteste
+encontrou dois defeitos reais: `create` valida largura e altura em `c,d` e
+`Message` ocupa 20 bytes, não 24.
+
+**Marco 24 (alteração de resolução segura): QEMU feito; aceite físico
+pendente.** `video::init_mode(mode)` valida o modo pelo contrato de `gfx`,
+negocia com o firmware, remapeia o buffer e só então publica o estado. Se o
+pedido falha, ele tenta renegociar o modo anterior; se nem isso funciona,
+marca o vídeo como indisponível em vez de deixar a tela apontando para um
+buffer inválido. `modes::apply` guarda o modo anterior e entrega um `Pending`
+com prazo de `CONFIRM_TICKS` (150 ticks, 1,5 s a 100 Hz): se o usuário não
+confirmar, `expired()` permite que o modo anterior volte sozinho — cobre o
+caso em que o monitor não sincroniza e a pessoa não enxerga nada para
+digitar.
+
+O comando `resolucao` sem argumento mostra o modo ativo; `resolucao N` aplica
+o modo de índice `N` da tabela do Marco 23. A linha seguinte digitada
+confirma (ou `cancela` restaura), independentemente do comando. A GUI passou
+a calcular o layout a partir das dimensões reais (`Layout::for_screen`), com
+painéis proporcionais e limites de linha por painel; em 640x480 o resultado é
+idêntico ao anterior.
+
+Ciclo validado no QEMU: `640x480` → `resolucao 1` → confirma → `800x600` →
+`resolucao 0` → `cancela` → volta a `800x600`. Dois defeitos corrigidos no
+caminho: `resolve_pending` recebia só o argumento do comando e não a linha
+inteira, então `cancela` nunca era reconhecido; e o `reply` precisava
+consumir a linha de confirmação antes de interpretá-la como comando.
+
+**Bug encontrado no Pi.** `resolucao 1` respondia `modo nao suportado`
+logo após o boot. A causa: `is_supported()` consultava uma máscara em cache
+que só era preenchida por `discover()`, chamado por `modos`. Sem rodar
+`modos` antes, a máscara estava zerada e todo modo era recusado. A correção
+calcula `VALID_MASK` em tempo de compilação a partir da própria tabela, sem
+depender do firmware nem de ordem de comandos. O teste automatizado passou a
+executar a troca real **antes** de `modos`, e o ciclo red-green foi
+comprovado: com o bug reintroduzido, `make check` falha em
+`timeout esperando b'resolucao: 800x600 aplicada'`; com a correção, passa.
+
+**Teclado USB no Pi — resolvido.** A saída da UART do Pi mostra
+`usb-host-ready`, `usb-hub-found`, `teclado: hid` e `usb-keyboard-hid`.
+A pendência de enumeração descrita abaixo deixou de ocorrer.
+
+**Marco 25 (mapa de endereços do framebuffer e modos altos): QEMU feito;
+aceite físico pendente.** A janela do programa de usuário ficava em
+`0x3C200000`, exatamente na faixa onde o firmware aloca framebuffers maiores
+que 800x600 (`0x3C000000..0x3C280000`). Por isso `resolucao 2` em diante
+respondia `modo nao suportado` ou `falhou`: o buffer novo caía sobre a
+própria página de código do EL0 e `mmu::map_framebuffer` recusava com razão.
+
+A janela do EL0 foi movida para `0x3D000000`, no vão livre entre a RAM e o
+MMIO. A asserção em tempo de compilação `USER_L2 == 488` e a nova
+`USER_CODE_VA >= 0x3D00_0000` impedem que a janela volte para a faixa do
+framebuffer. `init_mode` também passou a liberar o buffer anterior com
+`RELEASE_FRAMEBUFFER` antes de pedir outro, e a diagnosticar o conflito com a
+janela EL0 em vez de falhar em silêncio.
+
+Resultado no QEMU: **todos os seis modos aplicam** — `640x480`, `800x600`,
+`1024x768`, `1280x720` (HD), `1280x1024` e `1920x1080` (Full HD) — e as
+regressões do EL0 continuam passando (`usuario: el0`, `proprio: ok`,
+`usuario: kernel negado`, `roda`/`app: ok`). O `make check` exercita a troca
+para todos os modos e volta ao modo seguro.
+
+**Boot em Full HD com fallback.** `video::BOOT_MODES` tenta `1920x1080`,
+depois `1280x720` e por fim `640x480`. Se o firmware recusar um modo, o
+kernel registra `video: WxH recusado; tentando o proximo` e segue para o
+seguinte, sem intervenção. No QEMU o boot entrega `1920x1080`; o fallback foi
+comprovado forçando dois modos inválidos, que caíram para `640x480`.
+
+A janela de confirmação de `resolucao N` passou de 1,5 s para **10 s**
+(`CONFIRM_TICKS = 1000`) e a expiração agora é verificada **durante** a
+espera, em `read_line`. Antes ela só era detectada quando o usuário digitava
+algo, então o comando seguinte expirava a troca em vez de confirmá-la — o
+sintoma observado no Pi. O comando `tela` e a cena de `video::exercise`
+passaram a acompanhar a resolução real em vez de assumir 640x480.
+
+**Marco 25 (reconstrução do framebuffer após mudança): QEMU feito; aceite
+físico pendente.** `mmu::map_framebuffer` passou a **restaurar a tradução
+anterior** antes de mapear o buffer novo. Antes, cada troca de resolução
+deixava as páginas do framebuffer antigo mapeadas como memória normal para
+sempre: a função só reescrevia os blocos que tocava, então faixas que
+deixavam de ser framebuffer ficavam privilegiadas e acessíveis sem motivo.
+Agora `FB_START`/`FB_END` guardam o intervalo em vigor, `restore_previous()`
+devolve cada bloco ao descritor original e `unmap_framebuffer()` é usado
+quando o vídeo termina indisponível, para não sobrar mapeamento órfão.
+
+O `make check` alterna `1920x1080` e `640x480` três vezes, aplica
+`1280x720` e exige `tela: ok 1280x720 rgb565` no fim — sete trocas
+consecutivas sem artefato, sem perder a GUI e sem acesso fora dos limites.
+No Pi, o boot já foi confirmado em Full HD em 2026-11-07.
+
+Mídia de teste: `/dev/sda` de 29,7 GB, cartão SD em adaptador USB, partição
+`/dev/sda1` em FAT32 montada em `/media/vladimir/PENDRIVE`. `make write`
+copia os cinco arquivos sem formatar; depois de gravar, `sync` e
+`udisksctl unmount -b /dev/sda1` antes de retirar o cartão, e então
+`make preview` para ver no QEMU o que o Pi deve mostrar.
+
+**Marco 23 (descoberta de modos): QEMU feito; aceite físico pendente.** A
+consulta ao firmware vive em `src/modes.rs`. Ela pergunta as dimensões e o
+stride correntes ao mailbox de propriedades e mantém uma tabela
+conservadora de seis modos RGB565 (`640x480`, `800x600`, `1024x768`,
+`1280x720`, `1280x1024`, `1920x1080`), ordenada por área, com o menor como
+modo seguro. O comando `modos` imprime o modo atual, quantos modos da tabela
+são aceitos e, para cada um, `stride` e tamanho do buffer, marcando com `*`
+o que está ativo. Executa também o autoteste, que valida a tabela pelo
+contrato de `gfx`, a ordem crescente, o modo seguro, a rejeição de índice
+inválido e o limite de `MAX_MODES`. `make check` exige
+`modos: descoberta ok`.
+
+Dois defeitos reais encontrados e corrigidos na implementação: a tag de
+leitura é `0x0004_0003` (`GET_PHYSICAL_WIDTH_HEIGHT`), não `0x0004_8003`,
+que é a de escrita; e o código de resposta do mailbox fica na palavra 4 do
+buffer, não na 3, que é o tamanho da tag. No QEMU o resultado é
+`modos: atual 640x480 stride 1280` com 6 de 6 modos aceitos.
+
+## Fontes de referência já usadas no plano-base
+
+- [Raspberry Pi — especificações do 3B+](https://www.raspberrypi.com/products/raspberry-pi-3-model-b-plus)
+- [Arm — níveis de exceção](https://learn.arm.com/learning-paths/embedded-and-microcontrollers/bare-metal/exception-levels)
+- [QEMU — modelos Raspberry Pi](https://www.qemu.org/docs/master/system/arm/raspi.html)
+- [OpenStax — What Is an Operating System?](https://openstax.org/books/introduction-computer-science/pages/6-1-what-is-an-operating-system)
+- [Pearson — Modern Operating Systems, 5th edition](https://www.pearson.com/en-us/subject-catalog/p/modern-operating-systems/P200000003295/9780137618880)
